@@ -41,28 +41,32 @@ fn explicit_field_wins_over_a_hash_in_path() {
 fn missing_path_is_rejected() {
     let s = settings(json!({ "field": "api_key" }));
     let err = parse_reference(&s).unwrap_err();
-    assert!(err.0.contains("path"), "{}", err.0);
+    assert_eq!(err.kind, busbar_api::SecretErrorKind::Invalid);
+    assert!(err.message.contains("path"), "{}", err.message);
 }
 
 #[test]
 fn path_with_no_field_and_no_hash_is_rejected() {
     let s = settings(json!({ "path": "kv/data/openai" }));
     let err = parse_reference(&s).unwrap_err();
-    assert!(err.0.contains("field to extract"), "{}", err.0);
+    assert_eq!(err.kind, busbar_api::SecretErrorKind::Invalid);
+    assert!(err.message.contains("field to extract"), "{}", err.message);
 }
 
 #[test]
 fn empty_field_after_hash_is_rejected() {
     let s = settings(json!({ "path": "kv/data/openai#" }));
     let err = parse_reference(&s).unwrap_err();
-    assert!(err.0.contains("field to extract"), "{}", err.0);
+    assert_eq!(err.kind, busbar_api::SecretErrorKind::Invalid);
+    assert!(err.message.contains("field to extract"), "{}", err.message);
 }
 
 #[test]
 fn empty_explicit_field_is_rejected() {
     let s = settings(json!({ "path": "kv/data/openai", "field": "" }));
     let err = parse_reference(&s).unwrap_err();
-    assert!(err.0.contains("must not be empty"), "{}", err.0);
+    assert_eq!(err.kind, busbar_api::SecretErrorKind::Invalid);
+    assert!(err.message.contains("must not be empty"), "{}", err.message);
 }
 
 #[test]
@@ -154,19 +158,21 @@ fn roundtrip_against_live_vault() {
     // A wrong path is a distinct, loud 404 — never an empty Ok.
     let missing = settings(json!({ "path": "secret/data/no-such-secret#x" }));
     let err = module.resolve(&missing).unwrap_err();
+    assert_eq!(err.kind, busbar_api::SecretErrorKind::NotFound);
     assert!(
-        err.0.contains("404"),
+        err.message.contains("404"),
         "expected a 404 error, got: {}",
-        err.0
+        err.message
     );
 
     // A wrong field on a REAL path is also a distinct, loud error naming the field.
     let bad_field = settings(json!({ "path": "secret/data/busbar-test#no_such_field" }));
     let err = module.resolve(&bad_field).unwrap_err();
+    assert_eq!(err.kind, busbar_api::SecretErrorKind::NotFound);
     assert!(
-        err.0.contains("no_such_field"),
+        err.message.contains("no_such_field"),
         "expected the error to name the missing field, got: {}",
-        err.0
+        err.message
     );
 
     // A bad token is a distinct, loud 403 — never conflated with the 404 path.
@@ -178,9 +184,10 @@ fn roundtrip_against_live_vault() {
     })
     .expect("build VaultSecretModule with a bad token");
     let err = bad_token_module.resolve(&hash_settings).unwrap_err();
+    assert_eq!(err.kind, busbar_api::SecretErrorKind::Denied);
     assert!(
-        err.0.contains("403"),
+        err.message.contains("403"),
         "expected a 403 error, got: {}",
-        err.0
+        err.message
     );
 }

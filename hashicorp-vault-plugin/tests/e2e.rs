@@ -140,10 +140,11 @@ fn load_and_exercise_hashicorp_vault_plugin() {
     let err = module
         .resolve(&missing)
         .expect_err("a missing Vault path must fail closed over the real ABI");
+    assert_eq!(err.kind, busbar_api::SecretErrorKind::NotFound);
     assert!(
-        err.0.contains("404"),
+        err.message.contains("404"),
         "expected a 404 error, got: {}",
-        err.0
+        err.message
     );
 
     // A reference settings map with no addressable field at all must also fail closed.

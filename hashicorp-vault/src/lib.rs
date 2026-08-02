@@ -122,15 +122,15 @@ pub fn parse_reference(
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            SecretError("missing or non-string `path` in secret reference settings".to_string())
+            SecretError::invalid("missing or non-string `path` in secret reference settings")
         })?;
 
     // Explicit `field` wins over any `#` embedded in `path` — the two-key spelling is meant to be
     // usable even against a path that (unusually) contains a literal `#`.
     if let Some(field) = settings.get("field").and_then(|v| v.as_str()) {
         if field.is_empty() {
-            return Err(SecretError(
-                "`field` in secret reference settings must not be empty".to_string(),
+            return Err(SecretError::invalid(
+                "`field` in secret reference settings must not be empty",
             ));
         }
         return Ok((path.to_string(), field.to_string()));
@@ -138,7 +138,7 @@ pub fn parse_reference(
 
     match path.rsplit_once('#') {
         Some((p, f)) if !p.is_empty() && !f.is_empty() => Ok((p.to_string(), f.to_string())),
-        _ => Err(SecretError(format!(
+        _ => Err(SecretError::invalid(format!(
             "vault secret reference must name a field to extract: either add a `field` key, or \
              suffix `path` with `#<field>` (e.g. \"kv/data/openai#api_key\"); got path {path:?}"
         ))),
@@ -188,38 +188,40 @@ impl VaultSecretModule {
             .get(&url)
             .header("X-Vault-Token", &self.token)
             .send()
-            .map_err(|e| SecretError(format!("request to Vault ({url}) failed: {e}")))?;
+            .map_err(|e| {
+                SecretError::unavailable(format!("request to Vault ({url}) failed: {e}"))
+            })?;
 
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(SecretError(format!(
+            return Err(SecretError::not_found(format!(
                 "Vault has no secret at path {vault_path:?} (404 from {url})"
             )));
         }
         if status == reqwest::StatusCode::FORBIDDEN {
-            return Err(SecretError(format!(
+            return Err(SecretError::denied(format!(
                 "Vault denied reading path {vault_path:?} (403 from {url}): check the token is \
                  valid and its policy grants read on this path"
             )));
         }
         if status.is_server_error() {
-            return Err(SecretError(format!(
+            return Err(SecretError::unavailable(format!(
                 "Vault server error reading path {vault_path:?}: HTTP {status} from {url}"
             )));
         }
 
         let body = read_capped(resp, MAX_VAULT_RESPONSE_BYTES)
-            .map_err(|e| SecretError(format!("{e} (path {vault_path:?}, {url})")))?;
+            .map_err(|e| SecretError::unavailable(format!("{e} (path {vault_path:?}, {url})")))?;
 
         if !status.is_success() {
             let excerpt: String = String::from_utf8_lossy(&body).chars().take(300).collect();
-            return Err(SecretError(format!(
+            return Err(SecretError::internal(format!(
                 "Vault returned HTTP {status} reading path {vault_path:?} ({url}): {excerpt}"
             )));
         }
 
         let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
-            SecretError(format!(
+            SecretError::internal(format!(
                 "Vault response for path {vault_path:?} is not valid JSON: {e}"
             ))
         })?;
@@ -228,7 +230,7 @@ impl VaultSecretModule {
             .and_then(|d| d.get("data"))
             .and_then(|d| d.as_object())
             .ok_or_else(|| {
-                SecretError(format!(
+                SecretError::invalid(format!(
                     "Vault response for path {vault_path:?} has no `data.data` object (not a KV v2 \
                      read? check the path includes the `data/` segment, e.g. \"mount/data/name\")"
                 ))
@@ -236,7 +238,7 @@ impl VaultSecretModule {
 
         let value = data.get(field).ok_or_else(|| {
             let available: Vec<&str> = data.keys().map(String::as_str).collect();
-            SecretError(format!(
+            SecretError::not_found(format!(
                 "Vault secret at path {vault_path:?} has no field {field:?}; available fields: \
                  {available:?}"
             ))
