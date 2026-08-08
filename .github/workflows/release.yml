@@ -36,6 +36,7 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "busbar-hashicorp-vault ${GITHUB_REF_NAME}" \
+            --draft \
             --verify-tag --generate-notes \
           || gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}"
 
@@ -175,3 +176,9 @@ jobs:
                  "delete this tag+release, and re-cut." >&2
             exit 1
           fi
+          # Only now, with assets provably attached, does this stop being a draft and become
+          # the release that `releases/latest` resolves to.
+          gh release edit "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft=false --latest
+          echo "::notice::Published ${GITHUB_REF_NAME} with ${count} asset(s)."
