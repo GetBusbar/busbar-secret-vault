@@ -6,8 +6,8 @@
 # same-repo Cargo workspace — not split across this repo and busbarAI. Only busbar-api/
 # busbar-plugin-sdk (and, for the adapter's dev-dependencies, busbar-plugin-loader/
 # busbar-plugin-abi) still reach into a sibling busbarAI checkout, since those are core-engine
-# contracts every plugin depends on the same way. Mirrors GetBusbar/auth-oidc's restructure
-# (commit 1875b2f) exactly.
+# contracts every plugin depends on the same way. Mirrors GetBusbar/auth-oidc's same-repo
+# workspace layout exactly.
 [workspace]
 resolver = "2"
 members = [
