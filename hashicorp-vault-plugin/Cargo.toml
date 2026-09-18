@@ -16,8 +16,8 @@ crate-type = ["cdylib", "rlib"]   # cdylib for the C ABI delivery; rlib so the u
 # the real logic lives here, not in busbarAI). Only busbar-api/busbar-plugin-sdk still reach into
 # busbarAI — INTERIM local path dependencies into a sibling checkout, since busbarAI isn't public
 # yet; once it ships publicly these become git (pinned rev/tag) or crates.io dependencies instead.
-busbar-api = { path = "../../busbarAI/crates/api" }
-busbar-plugin-sdk = { path = "../../busbarAI/crates/plugin-sdk" }
+busbar-api = { path = "../../busbar/crates/api" }
+busbar-plugin-sdk = { path = "../../busbar/crates/plugin-sdk" }
 busbar-hashicorp-vault = { path = "../hashicorp-vault" }
 serde_json = "1"
 
@@ -26,8 +26,7 @@ serde_json = "1"
 # end-to-end test loads the built cdylib over the real loader ABI seam and seeds/reads a secret
 # against a real Vault dev-mode server, so `busbar-hashicorp-vault`'s own HTTP client does a genuine
 # round trip rather than a stub.
-busbar-plugin-loader = { path = "../../busbarAI/crates/plugin-loader" }
-busbar-plugin-abi = { path = "../../busbarAI/crates/plugin-abi" }
+busbar-plugin-loader = { path = "../../busbar/crates/plugin-loader" }
 # Same reqwest 0.12 major + blocking client shape busbar-hashicorp-vault's own client uses — the e2e
 # test's setup step seeds a secret into Vault via a raw HTTP PUT before reading it back through the
 # dlopen'd plugin.
