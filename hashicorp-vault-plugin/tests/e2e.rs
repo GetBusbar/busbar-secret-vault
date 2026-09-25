@@ -8,7 +8,7 @@
 //! back through the real C ABI, proving both field-addressing forms and the fail-closed 404/403
 //! paths survive the ABI crossing intact.
 //!
-//! Ported from `busbarAI`'s `crates/plugin-loader/src/lib.rs`
+//! Ported from `busbar`'s `crates/plugin-loader/src/lib.rs`
 //! (`load_and_exercise_hashicorp_vault_plugin`), the only over-the-ABI coverage of the real
 //! Vault-backed `kind: secret` dlopen seam, now hosted here as this plugin's own end-to-end test
 //! suite.

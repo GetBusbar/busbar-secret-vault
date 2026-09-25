@@ -13,8 +13,8 @@ crate-type = ["cdylib", "rlib"]   # cdylib for the C ABI delivery; rlib so the u
 
 [dependencies]
 # busbar-hashicorp-vault is now a SAME-REPO sibling crate (this plugin brings 100% of what it needs —
-# the real logic lives here, not in busbarAI). Only busbar-api/busbar-plugin-sdk still reach into
-# busbarAI — INTERIM local path dependencies into a sibling checkout, since busbarAI isn't public
+# the real logic lives here, not in busbar). Only busbar-api/busbar-plugin-sdk still reach into
+# busbar — INTERIM local path dependencies into a sibling checkout, since busbar isn't public
 # yet; once it ships publicly these become git (pinned rev/tag) or crates.io dependencies instead.
 busbar-api = { path = "../../busbar/crates/api" }
 busbar-plugin-sdk = { path = "../../busbar/crates/plugin-sdk" }
@@ -22,7 +22,7 @@ busbar-hashicorp-vault = { path = "../hashicorp-vault" }
 serde_json = "1"
 
 [dev-dependencies]
-# INTERIM local path deps into busbarAI, same rationale as above — these are dev-only. The
+# INTERIM local path deps into busbar, same rationale as above — these are dev-only. The
 # end-to-end test loads the built cdylib over the real loader ABI seam and seeds/reads a secret
 # against a real Vault dev-mode server, so `busbar-hashicorp-vault`'s own HTTP client does a genuine
 # round trip rather than a stub.

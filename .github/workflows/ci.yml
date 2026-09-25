@@ -3,7 +3,7 @@
 #
 # `service: vault` stands up the Vault dev server the test suite binds against, the same thin
 # `uses:` wrapper auth-oidc/store-sqlite/store-postgres/store-valkey use for their own services.
-# No `extra_sibling_test_command`: busbarAI does not carry crates/hashicorp-vault or
+# No `extra_sibling_test_command`: busbar does not carry crates/hashicorp-vault or
 # crates/hashicorp-vault-plugin in-tree, so this repo's own test suite, run above, is the
 # real-Vault-backed proof.
 #
@@ -38,12 +38,12 @@ jobs:
   # ── coverage: ADDITIVE, INFORMATIONAL, and NOT a gate. It does not feed the `ci` job above and is
   #    not a required status — a coverage delta can never block a PR (see codecov.yml:
   #    status.*.informational). It measures ONLY this repo's own workspace members (hashicorp-vault +
-  #    hashicorp-vault-plugin); the busbarAI path-deps are dependencies, not workspace members, so
-  #    they are not instrumented. Mirrors busbarAI's own `coverage` job (llvm-cov → tokenless codecov).
+  #    hashicorp-vault-plugin); the busbar path-deps are dependencies, not workspace members, so
+  #    they are not instrumented. Mirrors busbar's own `coverage` job (llvm-cov → tokenless codecov).
   coverage:
     name: coverage (llvm-cov · codecov)
     runs-on: ubuntu-latest
-    # Same tier gate as busbarAI's own coverage job: always on PRs and workflow_dispatch, and on
+    # Same tier gate as busbar's own coverage job: always on PRs and workflow_dispatch, and on
     # pushes only to the long-lived branches — never a throwaway feature-branch push.
     if: github.event_name != 'push' || contains(fromJSON('["refs/heads/main", "refs/heads/dev", "refs/heads/qa"]'), github.ref)
     services:
@@ -68,16 +68,21 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: plugin
-      # The workspace's Cargo.toml path-deps reach into a sibling busbarAI checkout (../../busbarAI)
-      # for busbar-api / busbar-plugin-sdk / busbar-plugin-loader / busbar-plugin-abi, so the plugin
-      # cannot compile without it. Pinned to the SHA in .busbar-ref — the exact busbar this repo's
-      # release builds against, and what Cargo.lock resolved against, so `--locked` holds.
+      # The workspace's Cargo.toml path-deps reach into a sibling busbar checkout (../../busbar)
+      # for busbar-api / busbar-plugin-sdk / busbar-plugin-loader, so the plugin cannot compile
+      # without it. Pinned to field 1 of .busbar-ref — the exact busbar this repo's release builds
+      # against, and what Cargo.lock resolved against, so `--locked` holds. Read from the file (the
+      # same way release.yml does) rather than copied here, so a re-pin can never leave this job on
+      # a stale engine.
+      - name: Resolve busbar ref from .busbar-ref
+        id: ref
+        run: echo "sha=$(cut -d' ' -f1 plugin/.busbar-ref)" >> "$GITHUB_OUTPUT"
       - name: Checkout busbar (sibling path dependency, pinned to .busbar-ref)
         uses: actions/checkout@v7
         with:
           repository: GetBusbar/busbar
-          ref: c8780349cf66d09b891478d50766b89dc1ff224c
-          path: busbarAI
+          ref: ${{ steps.ref.outputs.sha }}
+          path: busbar
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

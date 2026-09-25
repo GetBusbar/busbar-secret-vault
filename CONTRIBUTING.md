@@ -14,8 +14,8 @@ to build, test, and submit changes.
 ## Development setup
 
 `hashicorp-vault` is a Rust `cdylib` plugin. You need a recent stable toolchain
-(`rustup` recommended), and — until [busbarAI](https://github.com/GetBusbar/busbar)
-ships publicly — a sibling checkout of it at `../busbarAI`, since this crate's
+(`rustup` recommended), and — until [busbar](https://github.com/GetBusbar/busbar)
+ships publicly — a sibling checkout of it at `../busbar`, since this crate's
 `Cargo.toml` points at busbar's crates as local path dependencies. See the
 README's [Dependencies](README.md#dependencies) section for the exact layout;
 CI checks out `GetBusbar/busbar` at the branch named in
@@ -51,7 +51,7 @@ message (it hard-fails instead of skipping under CI — see the README's
 
 ## Architecture
 
-This repo is a 2-crate workspace, not a thin adapter reaching back into busbarAI
+This repo is a 2-crate workspace, not a thin adapter reaching back into busbar
 for its real logic:
 
 - `hashicorp-vault/` (crate `busbar-hashicorp-vault`) — the real Vault KV v2 HTTP

@@ -42,7 +42,7 @@ or an on-disk file.
 ## Design
 
 This repo brings 100% of what it needs — it is a 2-crate Cargo workspace,
-not a thin adapter pointing back at busbarAI for its real logic:
+not a thin adapter pointing back at busbar for its real logic:
 
 - **`hashicorp-vault/`** (crate `busbar-hashicorp-vault`) — the real Vault KV v2
   HTTP client: field addressing, response-size capping, and 404/403/5xx
@@ -63,8 +63,8 @@ AppRole/Kubernetes login flows are a natural future extension of
 ## Build
 
 Needs a Rust toolchain ([rustup](https://rustup.rs)), and — interim,
-until [busbarAI](https://github.com/GetBusbar/busbar) ships publicly —
-a sibling checkout of `busbarAI` at `../busbarAI` (see
+until [busbar](https://github.com/GetBusbar/busbar) ships publicly —
+a sibling checkout of `busbar` at `../busbar` (see
 [Dependencies](#dependencies) below).
 
 ```sh
@@ -78,23 +78,23 @@ cargo fmt --all -- --check
 
 `hashicorp-vault-plugin` depends on `busbar-hashicorp-vault` as a **same-repo**
 path dependency (`../hashicorp-vault`) — the real logic lives in this repo,
-not busbarAI. Only the core-engine contracts every plugin depends on the
+not busbar. Only the core-engine contracts every plugin depends on the
 same way — `busbar-api`, `busbar-plugin-sdk` (and, as dev-dependencies for
-the end-to-end test, `busbar-plugin-loader` and `busbar-plugin-abi`) —
-still reach into the [busbarAI](https://github.com/GetBusbar/busbar)
-monorepo. Because busbarAI is not yet public, `Cargo.toml` points at these
-as **local path dependencies** (`../../busbarAI/crates/...`), which means
-this repo expects to be checked out as a sibling of `busbarAI`:
+the end-to-end test, `busbar-plugin-loader`) —
+still reach into the [busbar](https://github.com/GetBusbar/busbar)
+monorepo. Because busbar is not yet public, `Cargo.toml` points at these
+as **local path dependencies** (`../../busbar/crates/...`), which means
+this repo expects to be checked out as a sibling of `busbar`:
 
 ```
 some-parent-dir/
-├── busbarAI/
+├── busbar/
 └── hashicorp-vault/
     ├── hashicorp-vault/
     └── hashicorp-vault-plugin/
 ```
 
-This is an interim measure — once busbarAI ships publicly, these should
+This is an interim measure — once busbar ships publicly, these should
 become git (pinned rev/tag) or crates.io dependencies instead. Grep
 `Cargo.toml` for the `INTERIM` comments when doing that migration.
 
@@ -103,7 +103,7 @@ become git (pinned rev/tag) or crates.io dependencies instead. Grep
 Once built, the cdylib is packed and signed like any other busbar plugin
 — see
 [`docs/plugins.md`](https://github.com/GetBusbar/busbar/blob/main/docs/plugins.md#signing-and-packaging)
-in busbarAI for the full reference. In short:
+in busbar for the full reference. In short:
 
 ```sh
 BUSBAR_SIGN_KEY=<signing key> busbar-plugin-pack pack \
