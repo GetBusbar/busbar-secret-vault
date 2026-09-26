@@ -92,7 +92,8 @@ jobs:
         run: cargo test --workspace --locked
 
   # The dropped-in door on a second platform (a Mach-O cdylib through the same loader). No service
-  # containers on macOS runners, so this leg runs the unit suites and the conformance test.
+  # containers on macOS runners, so this leg runs the unit suites and the conformance test; the one
+  # live-Vault unit test (which FAILS under CI without a server, never skips) runs in build-test.
   macos:
     name: build, unit + conformance [macos]
     runs-on: macos-latest
@@ -103,7 +104,7 @@ jobs:
       - name: build
         run: cargo build --workspace --locked
       - name: unit suites + linked/dropped-in conformance
-        run: cargo test --workspace --locked --lib --test conformance
+        run: cargo test --workspace --locked --lib --test conformance -- --skip roundtrip_against_live_vault
 
   # COVERAGE — ADDITIVE and NON-GATING: an instrumented run of this workspace's own suite, uploaded
   # to Codecov for the README badge. Nothing depends on it; a Codecov outage is a no-op
