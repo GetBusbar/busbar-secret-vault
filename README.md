@@ -16,7 +16,7 @@ one field out of a `kv-v2` entry and authenticating with a pre-obtained
 `X-Vault-Token`.
 
 It is a `cdylib` that implements busbar's `SecretModule` trait (via
-[`busbar-plugin-sdk`](https://github.com/GetBusbar/busbar/tree/main/crates/plugin-sdk))
+[`busbar-contract`](https://github.com/GetBusbar/busbar/tree/main/crates/busbar-contract))
 and is loaded in-process by busbar over the signed hybrid plugin ABI —
 `dlopen`'d, not spawned as a separate process.
 
@@ -62,9 +62,8 @@ AppRole/Kubernetes login flows are a natural future extension of
 
 ## Build
 
-Needs a Rust toolchain ([rustup](https://rustup.rs)), and — interim,
-until [busbar](https://github.com/GetBusbar/busbar) ships publicly —
-a sibling checkout of `busbar` at `../busbar` (see
+Needs a Rust toolchain ([rustup](https://rustup.rs)); `rust-toolchain.toml` pins
+the version CI uses. busbar is a pinned git dependency (see
 [Dependencies](#dependencies) below).
 
 ```sh
@@ -76,27 +75,19 @@ cargo fmt --all -- --check
 
 ## Dependencies
 
-`hashicorp-vault-plugin` depends on `busbar-hashicorp-vault` as a **same-repo**
-path dependency (`../hashicorp-vault`) — the real logic lives in this repo,
-not busbar. Only the core-engine contracts every plugin depends on the
-same way — `busbar-api`, `busbar-plugin-sdk` (and, as dev-dependencies for
-the end-to-end test, `busbar-plugin-loader`) —
-still reach into the [busbar](https://github.com/GetBusbar/busbar)
-monorepo. Because busbar is not yet public, `Cargo.toml` points at these
-as **local path dependencies** (`../../busbar/crates/...`), which means
-this repo expects to be checked out as a sibling of `busbar`:
+`busbar-hashicorp-vault` (`hashicorp-vault/`) is a same-repo crate; `hashicorp-vault-plugin`
+depends on it as a normal workspace path dependency (`../hashicorp-vault`).
 
-```
-some-parent-dir/
-├── busbar/
-└── hashicorp-vault/
-    ├── hashicorp-vault/
-    └── hashicorp-vault-plugin/
-```
-
-This is an interim measure — once busbar ships publicly, these should
-become git (pinned rev/tag) or crates.io dependencies instead. Grep
-`Cargo.toml` for the `INTERIM` comments when doing that migration.
+The one [busbar](https://github.com/GetBusbar/busbar) crate either crate
+names is `busbar-contract` — the plugin contract, whose `abi::sdk` module
+carries the export macros. `busbar-plugin-loader` is a dev-dependency only,
+for the linked + dropped-in conformance test and the end-to-end test. Both
+are **git dependencies pinned to one busbar commit**: the `rev` in every
+`Cargo.toml` is field 1 of `.busbar-ref`, and CI's `pin` job refuses a
+manifest that disagrees. No sibling checkout of busbar is needed to build
+or test; the live end-to-end test (`tests/e2e.rs`) builds the real `busbar`
+binary from a checkout named by `BUSBAR_CHECKOUT` (CI's `e2e` job provides
+one at `.busbar-ref`).
 
 ## Pack and sign
 

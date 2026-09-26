@@ -8,7 +8,7 @@
 //! success path lives in this crate's own `tests/e2e.rs`.
 
 use super::open;
-use busbar_api::SecretModule;
+use busbar_contract::secret::SecretModule;
 
 /// `open` returns `Result<Box<dyn SecretModule>, String>`, and `dyn SecretModule` is not `Debug`
 /// (it carries no such bound), so the standard `.unwrap_err()` doesn't compile here. This is the

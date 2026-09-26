@@ -1,15 +1,15 @@
-# Calls the canonical plugin-ci reusable workflow (GetBusbar/busbar/.github/workflows/plugin-ci.yml)
-# instead of hand-copying build/test/signoff steps here — see that file for what actually runs.
+# hashicorp-vault CI — build, test, and the HashiCorp Vault secret module's linked + dropped-in conformance, against the
+# busbar rev this repo PINS.
 #
-# `service: vault` stands up the Vault dev server the test suite binds against, the same thin
-# `uses:` wrapper auth-oidc/store-sqlite/store-postgres/store-valkey use for their own services.
-# No `extra_sibling_test_command`: busbar does not carry crates/hashicorp-vault or
-# crates/hashicorp-vault-plugin in-tree, so this repo's own test suite, run above, is the
-# real-Vault-backed proof.
+# This repo builds standalone: its only busbar dependency (busbar-contract, and busbar-plugin-loader
+# dev-only for the conformance and e2e tests) is a `git` dependency on
+# https://github.com/GetBusbar/busbar at the rev in field 1 of `.busbar-ref`. No sibling checkout, no
+# path dependency — so what CI proves is exactly what a busbar build that pulls this repo at a pinned
+# rev links.
 #
-# Pinned to busbar's `dev` branch (not the stale 1.5.0-dev branch, which predates the
-# generic-credentials/store-schema redesign and the ScopeRef admission-topology generalization)
-# — same convention store-mysql/store-postgres/store-valkey/store-sqlite/auth-oidc use.
+# The moving leg (this repo's `dev` against busbar's `predev`) is busbar's side of the contract: its
+# ci.yml `plugin-proofs` job builds this repo's `dev` with busbar-contract (and busbar-plugin-loader)
+# patched to busbar's own tree.
 name: ci
 
 on:
@@ -17,40 +17,51 @@ on:
     branches: [main, dev, qa]
   pull_request:
     branches: [main, dev, qa]
-  # Manual trigger. `gh run rerun` PINS the reusable-workflow SHA, so a fix landing in
-  # core's plugin-ci.yml can only be picked up by a NEW run, never by rerunning an old one.
   workflow_dispatch: {}
-jobs:
-  ci:
-    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@dev
-    with:
-      plugin_crate: busbar-hashicorp-vault-plugin
-      plugin_kind: secret
-      plugin_alias: vault
-      service: vault
-      busbar_ref: ${{ github.base_ref || github.ref_name }}
-      # base_ref FIRST: on a pull_request `github.ref_name` is '<number>/merge', not a branch
-      # name, so this asked busbar for a branch called '5/merge' and the sibling checkout died
-      # with an unreadable git error on EVERY pull request to this repo.
-      # Same-branch intent is unchanged: qa builds core qa, dev builds core dev, never a
-      # stale main or tag.
 
-  # ── coverage: ADDITIVE, INFORMATIONAL, and NOT a gate. It does not feed the `ci` job above and is
-  #    not a required status — a coverage delta can never block a PR (see codecov.yml:
-  #    status.*.informational). It measures ONLY this repo's own workspace members (hashicorp-vault +
-  #    hashicorp-vault-plugin); the busbar path-deps are dependencies, not workspace members, so
-  #    they are not instrumented. Mirrors busbar's own `coverage` job (llvm-cov → tokenless codecov).
-  coverage:
-    name: coverage (llvm-cov · codecov)
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  pin:
+    name: the busbar pin is one rev
     runs-on: ubuntu-latest
-    # Same tier gate as busbar's own coverage job: always on PRs and workflow_dispatch, and on
-    # pushes only to the long-lived branches — never a throwaway feature-branch push.
-    if: github.event_name != 'push' || contains(fromJSON('["refs/heads/main", "refs/heads/dev", "refs/heads/qa"]'), github.ref)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # Every `rev = "..."` on the busbar git source in every manifest is field 1 of `.busbar-ref`.
+      # Two revs would link two copies of the contract; a rev that disagrees with `.busbar-ref` makes
+      # the pin a lie about what the release builds against.
+      - name: every busbar git dependency names the .busbar-ref rev
+        run: |
+          set -euo pipefail
+          pin=$(awk '{print $1; exit}' .busbar-ref)
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::.busbar-ref field 1 is not a full sha: '$pin'"; exit 1; }
+          found=$(grep -hoE 'git = "https://github.com/GetBusbar/busbar", rev = "[0-9a-f]+"' */Cargo.toml | grep -oE '[0-9a-f]{40}' | sort -u)
+          [ -n "$found" ] || { echo "::error::no busbar git dependency found"; exit 1; }
+          if [ "$found" != "$pin" ]; then
+            echo "::error::busbar revs in manifests ($found) != .busbar-ref ($pin)"; exit 1
+          fi
+          if grep -nE 'path = "\.\./\.\./' */Cargo.toml; then
+            echo "::error::a manifest names a sibling-checkout path dependency"; exit 1
+          fi
+          # #40: the one busbar crate a plugin's NORMAL dependencies name is busbar-contract.
+          if awk '/^\[dependencies\]/{d=1;next} /^\[/{d=0} d && /^busbar-/ && !/^busbar-contract / && !/path = "\.\.\/[^.]/' */Cargo.toml | grep .; then
+            echo "::error::a normal dependency names a busbar crate other than busbar-contract (#40)"; exit 1
+          fi
+          echo "pinned busbar rev: $pin"
+
+  build-test:
+    name: fmt, clippy, build, test, conformance [ubuntu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
-      # Real Vault dev-mode server — MIRRORS EXACTLY the `vault` service the reusable plugin-ci.yml
-      # boots for this repo's own test leg (same digest-pinned image, VAULT_DEV_ROOT_TOKEN_ID=root,
-      # port 8200, --cap-add=IPC_LOCK, and the /v1/sys/health wget healthcheck), so the live-Vault
-      # tests are wired here the same way they are under `cargo test`.
+      # A real Vault dev-mode server: the live-Vault tests (hashicorp-vault/src/tests.rs and
+      # tests/e2e.rs) FAIL under CI without it, never skip. Digest-pinned.
       vault:
         image: hashicorp/vault@sha256:5be49781ecf78bfe775c5309c6a4d9f4e9e040b6c885c99eb2b12fb69855e1a2
         env:
@@ -64,45 +75,75 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - name: Checkout the plugin
-        uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1 # 1.98.0
         with:
-          path: plugin
-      # The workspace's Cargo.toml path-deps reach into a sibling busbar checkout (../../busbar)
-      # for busbar-api / busbar-plugin-sdk / busbar-plugin-loader, so the plugin cannot compile
-      # without it. Pinned to field 1 of .busbar-ref — the exact busbar this repo's release builds
-      # against, and what Cargo.lock resolved against, so `--locked` holds. Read from the file (the
-      # same way release.yml does) rather than copied here, so a re-pin can never leave this job on
-      # a stale engine.
-      - name: Resolve busbar ref from .busbar-ref
-        id: ref
-        run: echo "sha=$(cut -d' ' -f1 plugin/.busbar-ref)" >> "$GITHUB_OUTPUT"
-      - name: Checkout busbar (sibling path dependency, pinned to .busbar-ref)
-        uses: actions/checkout@v7
-        with:
-          repository: GetBusbar/busbar
-          ref: ${{ steps.ref.outputs.sha }}
-          path: busbar
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+          components: clippy, rustfmt
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: build (the rlib a busbar build links, and the cdylib a signed tarball carries)
+        run: cargo build --workspace --locked
+      - name: test (the module's own suite + live Vault + linked/dropped-in conformance over the real loader)
+        env:
+          BUSBAR_TEST_VAULT_ADDR: http://127.0.0.1:8200
+          BUSBAR_TEST_VAULT_TOKEN: root
+        run: cargo test --workspace --locked
+
+  # The dropped-in door on a second platform (a Mach-O cdylib through the same loader). No service
+  # containers on macOS runners, so this leg runs the unit suites and the conformance test.
+  macos:
+    name: build, unit + conformance [macos]
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1 # 1.98.0
+      - name: build
+        run: cargo build --workspace --locked
+      - name: unit suites + linked/dropped-in conformance
+        run: cargo test --workspace --locked --lib --test conformance
+
+  # COVERAGE — ADDITIVE and NON-GATING: an instrumented run of this workspace's own suite, uploaded
+  # to Codecov for the README badge. Nothing depends on it; a Codecov outage is a no-op
+  # (`fail_ci_if_error: false`).
+  coverage:
+    name: coverage (llvm-cov · codecov)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'push' || contains(fromJSON('["refs/heads/main", "refs/heads/dev", "refs/heads/qa"]'), github.ref)
+    timeout-minutes: 45
+    services:
+      # A real Vault dev-mode server: the live-Vault tests (hashicorp-vault/src/tests.rs and
+      # tests/e2e.rs) FAIL under CI without it, never skip. Digest-pinned.
+      vault:
+        image: hashicorp/vault@sha256:5be49781ecf78bfe775c5309c6a4d9f4e9e040b6c885c99eb2b12fb69855e1a2
+        env:
+          VAULT_DEV_ROOT_TOKEN_ID: root
+        ports:
+          - 8200:8200
+        options: >-
+          --cap-add=IPC_LOCK
+          --health-cmd "wget -qO- http://127.0.0.1:8200/v1/sys/health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1 # 1.98.0
         with:
           components: llvm-tools-preview
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: plugin
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Collect coverage (workspace, live-Vault tests wired)
-        working-directory: plugin
+      - name: Collect coverage
         env:
           BUSBAR_TEST_VAULT_ADDR: http://127.0.0.1:8200
           BUSBAR_TEST_VAULT_TOKEN: root
         run: cargo llvm-cov --workspace --locked --ignore-run-fail --lcov --output-path lcov.info
-      - name: Upload to Codecov (tokenless; never fails the build)
+      - name: Upload to Codecov (never fails the build)
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: plugin/lcov.info
+          files: lcov.info
           slug: GetBusbar/hashicorp-vault
           fail_ci_if_error: false

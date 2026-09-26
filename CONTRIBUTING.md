@@ -14,12 +14,9 @@ to build, test, and submit changes.
 ## Development setup
 
 `hashicorp-vault` is a Rust `cdylib` plugin. You need a recent stable toolchain
-(`rustup` recommended), and — until [busbar](https://github.com/GetBusbar/busbar)
-ships publicly — a sibling checkout of it at `../busbar`, since this crate's
-`Cargo.toml` points at busbar's crates as local path dependencies. See the
-README's [Dependencies](README.md#dependencies) section for the exact layout;
-CI checks out `GetBusbar/busbar` at the branch named in
-[`ci.yml`](.github/workflows/ci.yml)'s `busbar_ref` input to the same place.
+(`rustup` recommended; `rust-toolchain.toml` pins CI's version). busbar is a
+git dependency pinned to the commit in `.busbar-ref` — no sibling checkout is
+needed; see the README's [Dependencies](README.md#dependencies) section.
 
 The end-to-end test needs a real Vault dev-mode server:
 
@@ -61,7 +58,7 @@ for its real logic:
   `cdylib` adapter: turns the engine's JSON config into a `VaultConfig`/
   `VaultSecretModule` (from the sibling `hashicorp-vault` crate) and hands the
   trait object to
-  [`busbar-plugin-sdk`](https://github.com/GetBusbar/busbar/tree/main/crates/plugin-sdk),
+  [`busbar-contract`](https://github.com/GetBusbar/busbar/tree/main/crates/busbar-contract)'s `abi::sdk`,
   which emits the C ABI symbols the loader resolves.
 
 Changes to the ABI-crossing seam (`hashicorp-vault-plugin/src/lib.rs`) deserve

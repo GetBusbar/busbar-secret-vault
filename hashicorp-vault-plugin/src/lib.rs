@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The **Vault secret module as a droppable busbar plugin** — a `cdylib` that exports the secret C
-//! ABI (`busbar_plugin_abi::kind::SECRET`). Build it, drop the resulting `.so`/`.dll`/`.dylib` into
+//! ABI (`busbar_contract::abi::cold::kind::SECRET`). Build it, drop the resulting `.so`/`.dll`/`.dylib` into
 //! the engine's plugins folder, give it a module NAME under `secrets:` (its open-time config — the
 //! Vault address + token), and reference it from any secret field: `{ module: <alias>, settings: {
 //! path: "kv/data/openai#api_key" } }`.
@@ -12,7 +12,7 @@
 //! open-time config into a `VaultConfig` and hand the trait object to the SDK, which emits the
 //! extern-C symbols the loader resolves — mirroring `busbar-auth-oidc-plugin`'s `open()` exactly.
 
-use busbar_api::SecretModule;
+use busbar_contract::secret::SecretModule;
 use busbar_hashicorp_vault::{VaultConfig, VaultSecretModule};
 
 /// Construct a Vault secret module from the JSON config the engine passes through `open` — the
@@ -43,7 +43,7 @@ fn open(cfg: &str) -> Result<Box<dyn SecretModule>, String> {
     Ok(Box::new(VaultSecretModule::new(&cfg)?))
 }
 
-busbar_plugin_sdk::export_secret_plugin!(open);
+busbar_contract::export_secret_plugin!(open);
 
 #[cfg(test)]
 mod tests;
