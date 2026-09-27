@@ -1,4 +1,14 @@
-# hashicorp-vault
+<!-- fleet:header:begin (rendered by `cargo xtask fleet render` from GetBusbar/busbar's plugins.yaml; edit it there) -->
+# busbar-secret-vault
+
+The HashiCorp Vault secret backend as a droppable busbar plugin: a cdylib exporting the secret C ABI. Drop it in the plugins folder, add vault to secrets: with its addr/token settings, and reference secrets as { module: vault, settings: { path: "kv/data/name#field" } }.
+
+| kind | alias | crate | busbar | license |
+|---|---|---|---|---|
+| `secret` | `vault` | `busbar-hashicorp-vault-plugin` | 1.6.0 (pinned in `.busbar-ref`) | Apache-2.0 |
+
+[![ci](https://github.com/GetBusbar/busbar-secret-vault/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-secret-vault/actions/workflows/ci.yml)
+<!-- fleet:header:end -->
 
 **This plugin's version: v1.0.0.** (Independently versioned from busbar
 itself — see [Versioning](#versioning) below.)

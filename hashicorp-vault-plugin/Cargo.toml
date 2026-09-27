@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]   # cdylib for the C ABI delivery; rlib so the u
 # busbar-hashicorp-vault is now a SAME-REPO sibling crate (this plugin brings 100% of what it needs —
 # the real logic lives here, not in busbar). The one busbar crate is busbar-contract (#40), whose
 # `abi::sdk` carries the export macro — pinned by git rev to `.busbar-ref` field 1.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4" }
 busbar-hashicorp-vault = { path = "../hashicorp-vault" }
 serde_json = "1"
 
@@ -25,7 +25,7 @@ serde_json = "1"
 # over the REAL loader; the end-to-end test loads the built cdylib over the real loader ABI seam and seeds/reads a secret
 # against a real Vault dev-mode server, so `busbar-hashicorp-vault`'s own HTTP client does a genuine
 # round trip rather than a stub.
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4" }
 # Same reqwest 0.12 major + blocking client shape busbar-hashicorp-vault's own client uses — the e2e
 # test's setup step seeds a secret into Vault via a raw HTTP PUT before reading it back through the
 # dlopen'd plugin.
