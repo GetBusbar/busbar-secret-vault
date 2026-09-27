@@ -3,7 +3,7 @@
 # This repo brings 100% of what it needs: the real HashiCorp Vault KV v2 client logic
 # (hashicorp-vault, crate busbar-hashicorp-vault) and the thin dlopen ABI adapter that packages it as a
 # busbar plugin (hashicorp-vault-plugin, crate busbar-hashicorp-vault-plugin) both live here, as a
-# same-repo Cargo workspace — not split across this repo and busbar. Same layout as GetBusbar/auth-oidc.
+# same-repo Cargo workspace — not split across this repo and busbar. Same layout as GetBusbar/busbar-auth-oidc.
 #
 # Its one busbar dependency is busbar-contract (#40: a plugin names the contract only; the plugin
 # SDK is `busbar_contract::abi::sdk` since the #84 merge), plus busbar-plugin-loader dev-only for the

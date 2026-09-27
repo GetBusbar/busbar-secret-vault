@@ -3,9 +3,9 @@
 **This plugin's version: v1.0.0.** (Independently versioned from busbar
 itself — see [Versioning](#versioning) below.)
 
-[![CI](https://github.com/GetBusbar/hashicorp-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/GetBusbar/hashicorp-vault/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/GetBusbar/hashicorp-vault)](https://github.com/GetBusbar/hashicorp-vault/releases)
-[![Coverage](https://codecov.io/gh/GetBusbar/hashicorp-vault/branch/dev/graph/badge.svg)](https://codecov.io/gh/GetBusbar/hashicorp-vault)
+[![CI](https://github.com/GetBusbar/busbar-secret-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/GetBusbar/busbar-secret-vault/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/GetBusbar/busbar-secret-vault)](https://github.com/GetBusbar/busbar-secret-vault/releases)
+[![Coverage](https://codecov.io/gh/GetBusbar/busbar-secret-vault/branch/dev/graph/badge.svg)](https://codecov.io/gh/GetBusbar/busbar-secret-vault)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 The first-party, signed `kind: secret` plugin for

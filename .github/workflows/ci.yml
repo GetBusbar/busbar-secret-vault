@@ -149,5 +149,5 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
-          slug: GetBusbar/hashicorp-vault
+          slug: GetBusbar/busbar-secret-vault
           fail_ci_if_error: false
