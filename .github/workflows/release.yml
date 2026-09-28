@@ -40,7 +40,7 @@ jobs:
       lib_only: false
       needs_prompt: ""
       needs_user: ""
-      declares_file: "hashicorp-vault/declares.json"
+      declares_file: "secret-vault/declares.json"
     secrets: inherit
   consumer-verify:
     needs: release
