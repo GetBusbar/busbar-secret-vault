@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
-name = "busbar-hashicorp-vault"
+name = "busbar-secret-vault"
 version = "1.0.0"
 publish = false            # internal workspace crate; never goes to crates.io
 edition = "2021"

@@ -5,7 +5,7 @@
 //! `busbar-secret-example-plugin` stands in for (that crate is a hermetic in-memory-map TEST fixture,
 //! never a backend to run in production; see its doc comment). This crate is the reusable LOGIC
 //! (usable statically); the dynamic `cdylib` that exports the secret C ABI is the sibling
-//! `busbar-hashicorp-vault-plugin` crate — the same split `busbar-auth-oidc` / `busbar-auth-oidc-plugin`
+//! `busbar-secret-vault-plugin` crate — the same split `busbar-auth-oidc` / `busbar-auth-oidc-plugin`
 //! already establishes for the auth seam.
 //!
 //! ## What it does
@@ -43,8 +43,8 @@
 //! a secret reference resolved against the built-in `env`/`file` modules before it reaches here — see
 //! `busbar_config::SecretModuleCfg`). Implementing the AppRole login flow, Kubernetes auth, or any
 //! other method that itself needs a login round-trip is real scope creep for a first version and is
-//! left as a natural extension of THIS crate (`busbar-hashicorp-vault`) — not the thin ABI adapter
-//! (`busbar-hashicorp-vault-plugin`), which should stay a pass-through of whatever this crate grows.
+//! left as a natural extension of THIS crate (`busbar-secret-vault`) — not the thin ABI adapter
+//! (`busbar-secret-vault-plugin`), which should stay a pass-through of whatever this crate grows.
 //!
 //! ## Errors
 //!
@@ -70,7 +70,7 @@ fn default_timeout_secs() -> u64 {
     10
 }
 
-/// The `busbar-hashicorp-vault-plugin`'s open-time config — the `secrets.<module>.settings` map
+/// The `busbar-secret-vault-plugin`'s open-time config — the `secrets.<module>.settings` map
 /// `docs/plugins.md` describes as "the vault address + auth", passed through verbatim as JSON at
 /// `open()`. Distinct from the per-REFERENCE `settings` [`parse_reference`] parses.
 #[derive(Debug, Clone, Deserialize)]

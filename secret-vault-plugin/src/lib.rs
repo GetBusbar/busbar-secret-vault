@@ -8,12 +8,12 @@
 //! path: "kv/data/openai#api_key" } }`.
 //!
 //! All the Vault logic (the KV v2 HTTP client, field addressing, error classification) lives in the
-//! `busbar-hashicorp-vault` `lib` crate (usable statically too). Here we only adapt the engine's JSON
+//! `busbar-secret-vault` `lib` crate (usable statically too). Here we only adapt the engine's JSON
 //! open-time config into a `VaultConfig` and hand the trait object to the SDK, which emits the
 //! extern-C symbols the loader resolves — mirroring `busbar-auth-oidc-plugin`'s `open()` exactly.
 
 use busbar_contract::secret::SecretModule;
-use busbar_hashicorp_vault::{VaultConfig, VaultSecretModule};
+use busbar_secret_vault::{VaultConfig, VaultSecretModule};
 
 /// Construct a Vault secret module from the JSON config the engine passes through `open` — the
 /// `secrets.<module>.settings` map. Shape:

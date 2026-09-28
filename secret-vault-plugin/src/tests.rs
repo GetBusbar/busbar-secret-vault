@@ -4,7 +4,7 @@
 //! Unit tests for THIS crate's own responsibility: adapting the engine's JSON config into a real Vault
 //! module. Hermetic — no network (a valid `addr`/`token` pair only builds an HTTP client; it never
 //! connects until `resolve()` is called). This crate owns config-parsing coverage only, not the Vault
-//! HTTP/KV-v2 logic itself, which is `busbar-hashicorp-vault`'s own job. The real over-the-ABI, real-Vault
+//! HTTP/KV-v2 logic itself, which is `busbar-secret-vault`'s own job. The real over-the-ABI, real-Vault
 //! success path lives in this crate's own `tests/e2e.rs`.
 
 use super::open;

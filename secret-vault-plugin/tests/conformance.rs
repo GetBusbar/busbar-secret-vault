@@ -25,7 +25,7 @@ use busbar_plugin_loader::{LinkedPlugin, PluginRegistry};
 use std::io::{BufRead, BufReader, Write};
 
 /// The module's registry name and alias (what a `{ module: vault, settings: {...} }` reference names).
-const NAME: &str = "busbar-hashicorp-vault";
+const NAME: &str = "busbar-secret-vault";
 const ALIAS: &str = "vault";
 
 /// The token the loopback responder honours.
@@ -93,15 +93,13 @@ fn cdylib() -> Vec<u8> {
         .parent()
         .and_then(|d| d.parent())
         .expect("target/<profile>");
-    let file = busbar_plugin_loader::plugin_library_filename("busbar_hashicorp_vault_plugin");
+    let file = busbar_plugin_loader::plugin_library_filename("busbar_secret_vault_plugin");
     let found = [profile.join(&file), profile.join("deps").join(&file)]
         .into_iter()
         .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
         .max()
         .map(|(_, p)| p)
-        .unwrap_or_else(|| {
-            panic!("the busbar-hashicorp-vault-plugin cdylib ({file}) is not built")
-        });
+        .unwrap_or_else(|| panic!("the busbar-secret-vault-plugin cdylib ({file}) is not built"));
     std::fs::read(found).expect("read the cdylib")
 }
 
@@ -136,7 +134,7 @@ fn linked() -> PluginRegistry {
     PluginRegistry::empty()
         .link(vec![LinkedPlugin::boundary(
             statement("secret"),
-            &busbar_hashicorp_vault_plugin::BUSBAR_COLD_ENTRY,
+            &busbar_secret_vault_plugin::BUSBAR_COLD_ENTRY,
         )])
         .expect("the linked door admits the module")
 }

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
-name = "busbar-hashicorp-vault-plugin"
+name = "busbar-secret-vault-plugin"
 version = "1.0.0"
 publish = false            # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
 edition = "2021"
@@ -12,21 +12,21 @@ license = "Apache-2.0"
 crate-type = ["cdylib", "rlib"]   # cdylib for the C ABI delivery; rlib so the unit tests / e2e test can exercise it as a normal crate too
 
 [dependencies]
-# busbar-hashicorp-vault is now a SAME-REPO sibling crate (this plugin brings 100% of what it needs —
+# busbar-secret-vault is now a SAME-REPO sibling crate (this plugin brings 100% of what it needs —
 # the real logic lives here, not in busbar). The one busbar crate is busbar-contract (#40), whose
 # `abi::sdk` carries the export macro — pinned by git rev to `.busbar-ref` field 1.
 busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4" }
-busbar-hashicorp-vault = { path = "../hashicorp-vault" }
+busbar-secret-vault = { path = "../secret-vault" }
 serde_json = "1"
 
 [dev-dependencies]
 # Dev-only, same pinned busbar rev as busbar-contract (one busbar source resolves). The linked +
 # dropped-in conformance test (tests/conformance.rs) signs, packs, scans and opens the built cdylib
 # over the REAL loader; the end-to-end test loads the built cdylib over the real loader ABI seam and seeds/reads a secret
-# against a real Vault dev-mode server, so `busbar-hashicorp-vault`'s own HTTP client does a genuine
+# against a real Vault dev-mode server, so `busbar-secret-vault`'s own HTTP client does a genuine
 # round trip rather than a stub.
 busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4" }
-# Same reqwest 0.12 major + blocking client shape busbar-hashicorp-vault's own client uses — the e2e
+# Same reqwest 0.12 major + blocking client shape busbar-secret-vault's own client uses — the e2e
 # test's setup step seeds a secret into Vault via a raw HTTP PUT before reading it back through the
 # dlopen'd plugin.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }

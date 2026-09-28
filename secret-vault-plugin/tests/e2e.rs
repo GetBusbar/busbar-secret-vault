@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! End-to-end coverage of the `busbar-hashicorp-vault-plugin` cdylib loaded over the REAL loader
+//! End-to-end coverage of the `busbar-secret-vault-plugin` cdylib loaded over the REAL loader
 //! `kind:secret` seam (`busbar_plugin_loader::load_secret_from_bytes`) — the exact seam busbar's
 //! engine uses. This is not a stub: it seeds a real secret directly into a real Vault dev-mode
 //! server via a raw HTTP PUT, then `dlopen`s the actually-built plugin cdylib and reads that secret
@@ -26,7 +26,7 @@
 
 use busbar_plugin_loader::{load_secret_from_bytes, plugin_library_filename};
 
-/// Locate the built `busbar_hashicorp_vault_plugin` cdylib in the target dir (mirrors the loader's own
+/// Locate the built `busbar_secret_vault_plugin` cdylib in the target dir (mirrors the loader's own
 /// `hashicorp_vault_plugin_path` test helper). Under CI, a missing cdylib is a hard failure — this is
 /// the only over-the-ABI coverage of the real Vault-backed `kind: secret` dlopen seam and must never
 /// silently skip there.
@@ -34,21 +34,21 @@ fn plugin_path() -> Option<std::path::PathBuf> {
     let candidate = (|| {
         let exe = std::env::current_exe().ok()?;
         let profile_dir = exe.parent()?.parent()?;
-        let name = plugin_library_filename("busbar_hashicorp_vault_plugin");
+        let name = plugin_library_filename("busbar_secret_vault_plugin");
         let candidate = profile_dir.join(&name);
         candidate.exists().then_some(candidate)
     })();
     if candidate.is_none() && std::env::var_os("CI").is_some() {
         panic!(
             "the hashicorp-vault plugin cdylib is not built under CI: `cargo test --workspace`-\
-             equivalent must build busbar_hashicorp_vault_plugin. Refusing to silently skip the only \
+             equivalent must build busbar_secret_vault_plugin. Refusing to silently skip the only \
              over-the-ABI coverage of the real Vault-backed kind:secret dlopen seam."
         );
     }
     candidate
 }
 
-/// End-to-end: dlopen the REAL hashicorp-vault-plugin cdylib, `open()` it against a real local Vault
+/// End-to-end: dlopen the REAL secret-vault-plugin cdylib, `open()` it against a real local Vault
 /// dev-mode server's address + token, seed a real secret directly via Vault's KV v2 HTTP write
 /// endpoint, then `resolve()` it back through the real C ABI — both field-addressing forms, plus the
 /// fail-closed 404 path, all across the genuine ABI crossing.
@@ -74,7 +74,7 @@ fn load_and_exercise_hashicorp_vault_plugin() {
         _ => {
             eprintln!(
                 "skip: set BUSBAR_TEST_VAULT_ADDR + BUSBAR_TEST_VAULT_TOKEN to run the real \
-                 hashicorp-vault-plugin ABI test (docker run --rm -p 8200:8200 --cap-add=IPC_LOCK \
+                 secret-vault-plugin ABI test (docker run --rm -p 8200:8200 --cap-add=IPC_LOCK \
                  -e VAULT_DEV_ROOT_TOKEN_ID=root hashicorp/vault)"
             );
             return;
@@ -82,7 +82,7 @@ fn load_and_exercise_hashicorp_vault_plugin() {
     };
 
     // Seed a real secret with two fields directly via Vault's KV v2 write endpoint — this test's
-    // own setup, exactly like `busbar-hashicorp-vault`'s own `roundtrip_against_live_vault` test.
+    // own setup, exactly like `busbar-secret-vault`'s own `roundtrip_against_live_vault` test.
     let seed = reqwest::blocking::Client::new();
     let put_body =
         serde_json::json!({ "data": { "api_key": "sk-abi-xyz789", "org_id": "org-abi" } })
@@ -102,7 +102,7 @@ fn load_and_exercise_hashicorp_vault_plugin() {
 
     let bytes = std::fs::read(&path).expect("read hashicorp-vault plugin cdylib");
     let cfg = serde_json::json!({ "addr": addr, "token": token }).to_string();
-    let module = load_secret_from_bytes(&bytes, &cfg, "hashicorp-vault", "secret")
+    let module = load_secret_from_bytes(&bytes, &cfg, "secret-vault", "secret")
         .expect("load hashicorp-vault plugin over the ABI");
 
     // `#field` addressing.

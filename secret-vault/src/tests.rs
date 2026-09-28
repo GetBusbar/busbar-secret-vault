@@ -87,7 +87,7 @@ fn read_capped_refuses_over_the_cap_and_accepts_at_the_cap() {
 /// Start a real Vault first:
 /// ```sh
 /// docker run --rm -p 8200:8200 --cap-add=IPC_LOCK -e VAULT_DEV_ROOT_TOKEN_ID=root hashicorp/vault
-/// BUSBAR_TEST_VAULT_ADDR=http://127.0.0.1:8200 BUSBAR_TEST_VAULT_TOKEN=root cargo test -p busbar-hashicorp-vault
+/// BUSBAR_TEST_VAULT_ADDR=http://127.0.0.1:8200 BUSBAR_TEST_VAULT_TOKEN=root cargo test -p busbar-secret-vault
 /// ```
 ///
 /// Vault dev mode auto-mounts a `kv-v2` engine at `secret/`, so the test seeds
