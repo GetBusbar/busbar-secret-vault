@@ -324,7 +324,7 @@ fn the_linked_and_the_dropped_in_vault_plugin_are_one_plugin() {
             "Failed lease=false vault secret reference must name a field to extract: either add a `field` key, or suffix `path` with `#<field>` (e.g. \"kv/data/openai#api_key\"); got path \"kv/data/openai#\" kind=4",
             "Failed lease=false `field` in secret reference settings must not be empty kind=4",
             "NOT-AN-OBJECT",
-            format!("Failed lease=false request to Vault ({url}) failed: the host lends this plugin no http exchange for its declared need kind=2"),
+            format!("Failed lease=false request to Vault ({url}) failed: error sending request for url ({url}) kind=2"),
         ])
     );
     assert_eq!(linked["release_unknown"], "Refused lease=false ");

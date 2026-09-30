@@ -340,7 +340,7 @@ fn every_response_class_answers_1_5_5s_kind_and_text() {
         (
             Canned::of(Err("connection refused".into())),
             SecretErrorKind::Unavailable,
-            format!("request to Vault ({URL}) failed: connection refused"),
+            format!("request to Vault ({URL}) failed: error sending request for url ({URL})"),
         ),
         (
             Canned::status(404, "{\"errors\":[]}"),
