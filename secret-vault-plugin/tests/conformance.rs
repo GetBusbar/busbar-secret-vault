@@ -1,258 +1,431 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **ONE SECRET MODULE, BOTH DOORS, ONE ROW** — the Vault secret module's linked + dropped-in
-//! conformance (DECISIONS #2 rule (1): a plugin is compiled in OR dropped in — same contract, same
-//! loading path), run against the busbar rev this repo pins (`.busbar-ref`).
+//! **ONE VAULT PLUGIN, BOTH DOORS, ONE TABLE** — the Vault secret plugin's linked + dropped-in
+//! conformance on the secret kind's memory ABI (THE DESIGN §2 "Each plugin tests itself", §11.4),
+//! run against the busbar rev this repo pins (`.busbar-ref`).
 //!
-//! The module is held two ways at once: LINKED (this crate's `BUSBAR_COLD_ENTRY`, the boundary
-//! `export_secret_plugin!` emits and a busbar build that compiles the module in hands the loader,
-//! through `PluginRegistry::link`) and DROPPED IN (this crate's built cdylib, signed first-party
-//! under the SAME statement into a temp `plugins/` directory and found by the loader's scan). Each
-//! arm is opened by the one `open_secret` against a loopback KV v2 responder and driven through the
-//! same script — a field read, a missing field, a missing secret, a denied path, a malformed
-//! reference — each a real HTTP round trip by the module's own client, and the two transcripts,
-//! with the registry row each door resolves the name to, must be byte-identical. The live Vault
-//! dev server is `tests/e2e.rs`.
+//! The plugin is held two ways at once: LINKED (the logic crate's `door::door`, through the
+//! loader's `load_linked`) and DROPPED IN (this crate's built cdylib, `dlopen`ed by the loader's
+//! `load_dropped`, which resolves `busbar_plugin_door` and validates the door). Each is bound to a
+//! real dispatcher and driven over the same script through the secret kind's table: `validate`
+//! over 1.5.5's config refusals, `open` without and with the kernel-resolved token, `resolve` over
+//! every malformed reference and a well-formed one, `release` of a lease never granted, `refresh`
+//! refused and accepted, `tick`, `close`. The two transcripts must be equal.
 //!
-//! The RED arms are in the same file: the same cdylib opened under a DIFFERENT config (another
-//! token) is a different transcript (so the equality is not vacuous), and the same bytes signed as
-//! `auth` are refused at the kind handshake, naming both kinds. A missing cdylib PANICS — this test
+//! THE RED ARMS, same file: the door asked for as another kind is refused; a manifest stating
+//! another kind, or 1.5.5's secret ABI version, is refused before `dlopen` (a Statement mismatch);
+//! the dropped-in door opened over ANOTHER config answers a different transcript (so the equality
+//! is not vacuous); an `open` with no token material is refused. A missing cdylib PANICS — this test
 //! IS the dropped-in door's proof, and never skips.
+//!
+//! NOT YET HELD HERE, and why (ARCHITECT rulings R2/R2a, 2026-09-30): the undeclared-need and
+//! cross-instance `ConnId` arms need the need declaration (KIND-SHARE), the loader filling
+//! `HostTables.conns` (BOOT-CHAIN) and the SDK's safe `exchange()`; on this rev no instance is lent
+//! a connector, so the well-formed resolve answers UNAVAILABLE naming that — the same through both
+//! doors. The secret axis (`SecretRows`) that would open the plugin by module name through the
+//! registry is WIRE-SECRET's; this test drives the table through the loader's typed `Plugin`.
 
-use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
-use busbar_plugin_loader::{LinkedPlugin, PluginRegistry};
-use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
-/// The module's registry name and alias (what a `{ module: vault, settings: {...} }` reference names).
-const NAME: &str = "busbar-secret-vault";
-const ALIAS: &str = "vault";
+use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, BLOB_JSON, BLOB_OCTETS};
+use busbar_contract::abi::mechanism::lifecycle::{
+    slot as lc, OpenIn, OpenOut, RefreshIn, ReleaseIn, TickIn, TickOut, ValidateIn,
+};
+use busbar_contract::abi::mechanism::{KindCode, MECHANISM_VERSION};
+use busbar_contract::abi::secret::{self, ResolveIn, ResolveOut};
+use busbar_plugin_loader::dispatch::kinds::export::Export;
+use busbar_plugin_loader::dispatch::kinds::secret::Secret;
+use busbar_plugin_loader::dispatch::{
+    in_head, load_dropped, load_linked, out_head, Bind, Called, DispatchConfig, Dispatcher, Frame,
+    LoadError, ManifestFacts, NoSink, Plugin, NO_BLOB,
+};
 
-/// The token the loopback responder honours.
-const TOKEN: &str = "s.conformance";
-
-/// A loopback KV v2 responder: `GET /v1/kv/data/openai` answers the entry to [`TOKEN`], a known
-/// `denied` path answers 403, a wrong token answers 403, anything else 404. One request per
-/// connection (`Connection: close`). Returns its base address.
-fn spawn_kv() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = format!("http://{}", listener.local_addr().unwrap());
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut request_line = String::new();
-            let _ = reader.read_line(&mut request_line);
-            let mut token = String::new();
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-                    break;
-                }
-                if let Some((k, v)) = line.split_once(':') {
-                    if k.eq_ignore_ascii_case("x-vault-token") {
-                        token = v.trim().to_string();
-                    }
-                }
-            }
-            let path = request_line.split_whitespace().nth(1).unwrap_or("");
-            let (status, body) = match (token == TOKEN, path) {
-                (false, _) | (true, "/v1/kv/data/denied") => {
-                    ("403 Forbidden", r#"{"errors":["permission denied"]}"#)
-                }
-                (true, "/v1/kv/data/openai") => (
-                    "200 OK",
-                    r#"{"data":{"data":{"api_key":"sk-conformance","org":"acme"},"metadata":{"version":3}}}"#,
-                ),
-                _ => ("404 Not Found", r#"{"errors":[]}"#),
-            };
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-        }
-    });
-    addr
-}
-
-fn config(addr: &str, token: &str) -> String {
-    serde_json::json!({ "addr": addr, "token": token, "timeout_secs": 5 }).to_string()
-}
-
-/// The release key the dropped-in arm is signed with, and the policy's first-party key.
-fn release() -> SigningKey {
-    SigningKey::from_bytes(&[11u8; 32])
-}
+/// The token the kernel resolved; no transcript line may carry it.
+const TOKEN: &str = "s.conformance-token";
 
 /// This crate's built cdylib (uplifted or under `deps`, newest wins). A missing artifact is a
 /// failure, never a skip.
-fn cdylib() -> Vec<u8> {
+fn cdylib() -> PathBuf {
     let exe = std::env::current_exe().expect("the test binary has a path");
     let profile = exe
         .parent()
         .and_then(|d| d.parent())
         .expect("target/<profile>");
     let file = busbar_plugin_loader::plugin_library_filename("busbar_secret_vault_plugin");
-    let found = [profile.join(&file), profile.join("deps").join(&file)]
+    [profile.join(&file), profile.join("deps").join(&file)]
         .into_iter()
         .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
         .max()
         .map(|(_, p)| p)
-        .unwrap_or_else(|| panic!("the busbar-secret-vault-plugin cdylib ({file}) is not built"));
-    std::fs::read(found).expect("read the cdylib")
+        .unwrap_or_else(|| panic!("the busbar-secret-vault-plugin cdylib ({file}) is not built"))
 }
 
-/// The statement both doors make for the module, as `kind`, at the newest payload schema the
-/// loader speaks for that kind.
-fn statement(kind: &str) -> Manifest {
-    Manifest {
-        name: NAME.into(),
-        alias: ALIAS.into(),
-        kind: kind.into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-        publisher: busbar_plugin_loader::sign::FIRST_PARTY_PUBLISHER.into(),
-        abi_version: *busbar_plugin_loader::supported_abi(kind)
-            .iter()
-            .max()
-            .expect("a payload schema for the kind"),
-        sha256: String::new(),
-        signature: String::new(),
-        description: String::new(),
-        homepage: String::new(),
-        license: String::new(),
-        needs: Default::default(),
-        settings_schema: None,
-        schema_derived: false,
-        host: None,
-        declares: Default::default(),
+/// What the signed manifest states for the dropped-in image.
+fn facts() -> ManifestFacts {
+    ManifestFacts {
+        mechanism_version: MECHANISM_VERSION,
+        kind: KindCode::Secret,
+        kind_abi: secret::ABI_VERSION,
     }
 }
 
-/// THE LINKED DOOR: this crate's boundary, registered through `PluginRegistry::link`.
-fn linked() -> PluginRegistry {
-    PluginRegistry::empty()
-        .link(vec![LinkedPlugin::boundary(
-            statement("secret"),
-            &busbar_secret_vault_plugin::BUSBAR_COLD_ENTRY,
-        )])
-        .expect("the linked door admits the module")
+/// The process's dispatcher, as the composition root builds one.
+fn dispatcher() -> Arc<Dispatcher> {
+    Arc::new(Dispatcher::new(DispatchConfig {
+        workers: 2,
+        watchdog_period: Duration::from_millis(20),
+        ..DispatchConfig::default()
+    }))
 }
 
-/// THE DROPPED-IN DOOR: `lib` signed first-party under `manifest` into a fresh `plugins/`
-/// directory, scanned under a policy holding the release key.
-fn dropped(tag: &str, manifest: Manifest, lib: &[u8]) -> PluginRegistry {
-    let dir =
-        std::env::temp_dir().join(format!("hashicorp-vault-conf-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let signed = sign(&release(), manifest, lib);
-    let tarball = busbar_plugin_loader::tarball::package(&signed, "libsecret.so", lib).unwrap();
-    std::fs::write(dir.join("secret.tar.gz"), tarball).unwrap();
-    let policy = TrustPolicy {
-        first_party_key: Some(release().verifying_key()),
-        binary_version: env!("CARGO_PKG_VERSION").into(),
-        first_party_floors: Default::default(),
-        first_party_high_water: Default::default(),
-        publishers: Default::default(),
-        allow_unsigned: false,
-        allow_third_party: false,
-        min_versions: Default::default(),
-    };
-    let registry =
-        busbar_plugin_loader::scan_and_validate(&dir, &policy).expect("the signed module scans");
-    let _ = std::fs::remove_dir_all(&dir);
-    registry
+fn bind(d: &Dispatcher) -> Bind {
+    Bind {
+        max_inflight_cap: 64,
+        sink: Arc::new(NoSink),
+        dispatcher: d.adopter(),
+    }
 }
 
-/// What one door does with the module opened under `cfg`, as one comparable transcript: the row the
-/// name resolves to (and the row its alias resolves to), then each reference's resolution.
-fn transcript(registry: &PluginRegistry, cfg: &str) -> Vec<String> {
-    let p = registry.resolve(NAME).expect("the name resolves");
-    let stated = Manifest {
-        sha256: String::new(),
-        signature: String::new(),
-        ..p.manifest.clone()
-    };
-    let by_alias = registry.resolve(ALIAS).map(|a| a.manifest.name.clone());
-    let module = registry
-        .open_secret(ALIAS, cfg)
-        .expect("the module opens through its alias");
-    let references = [
-        serde_json::json!({ "path": "kv/data/openai#api_key" }),
-        serde_json::json!({ "path": "kv/data/openai", "field": "org" }),
-        serde_json::json!({ "path": "kv/data/openai#nope" }),
-        serde_json::json!({ "path": "kv/data/absent#api_key" }),
-        serde_json::json!({ "path": "kv/data/denied#api_key" }),
-        serde_json::json!({ "path": "kv/data/openai" }),
-        serde_json::json!({}),
-    ];
-    let mut out = vec![
-        serde_json::to_string(&stated).unwrap(),
-        format!("alias -> {by_alias:?}"),
-    ];
-    out.extend(
-        references
-            .iter()
-            .map(|r| match module.resolve(r.as_object().unwrap()) {
-                Ok(bytes) => format!("Ok({})", String::from_utf8_lossy(&bytes)),
-                Err(e) => format!("Err({e:?})"),
-            }),
+fn linked(d: &Dispatcher) -> Plugin<Secret> {
+    load_linked::<Secret>(busbar_secret_vault::door::door, bind(d)).expect("the linked door loads")
+}
+
+fn dropped(d: &Dispatcher) -> Plugin<Secret> {
+    load_dropped::<Secret>(&cdylib(), &facts(), bind(d)).expect("the dropped-in door loads")
+}
+
+fn json(bytes: &[u8]) -> Blob {
+    Blob {
+        ptr: bytes.as_ptr(),
+        len: bytes.len(),
+        fmt: BLOB_JSON,
+        flags: 0,
+    }
+}
+
+fn octets(bytes: &[u8]) -> Blob {
+    Blob {
+        ptr: bytes.as_ptr(),
+        len: bytes.len(),
+        fmt: BLOB_OCTETS,
+        flags: busbar_contract::abi::mechanism::call::BLOB_SECRET,
+    }
+}
+
+/// A call's answer as the transcript spells it: outcome, error text, and whether a lease came back.
+fn spelled(c: &Called) -> String {
+    let text = c
+        .error
+        .as_deref()
+        .map(String::from_utf8_lossy)
+        .unwrap_or_default();
+    format!("{:?} lease={} {text}", c.outcome, c.lease != 0)
+}
+
+fn validate(p: &Plugin<Secret>, settings: &str) -> String {
+    let mut f = Frame::new(
+        ValidateIn {
+            head: in_head(),
+            settings: json(settings.as_bytes()),
+        },
+        out_head(),
     );
-    out.push(
-        match module.resolve_with_deadline(references[0].as_object().unwrap(), Some(5_000)) {
-            Ok(bytes) => format!("Ok({})", String::from_utf8_lossy(&bytes)),
-            Err(e) => format!("Err({e:?})"),
+    spelled(&p.call(lc::VALIDATE, &mut f))
+}
+
+fn open(p: &Plugin<Secret>, settings: &str, token: Option<&str>) -> String {
+    let secrets: Vec<Blob> = token.map(|t| octets(t.as_bytes())).into_iter().collect();
+    let mut f = Frame::new(
+        OpenIn {
+            head: in_head(),
+            host: std::ptr::null(),
+            settings: json(settings.as_bytes()),
+            secrets: secrets.as_ptr(),
+            secrets_len: secrets.len(),
+            generation: 1,
+        },
+        OpenOut {
+            head: out_head(),
+            instance: std::ptr::null_mut(),
         },
     );
-    out
+    spelled(&p.call(lc::OPEN, &mut f))
 }
 
-/// The Vault module registers ONE row and behaves as ONE module through either door — and the RED
-/// arms show the comparison is not vacuous.
-#[test]
-fn the_linked_and_the_dropped_in_vault_module_are_one_module() {
-    let addr = spawn_kv();
-    let cfg = config(&addr, TOKEN);
-    let lib = cdylib();
-    let linked = transcript(&linked(), &cfg);
-    let dropped_registry = dropped("dropped", statement("secret"), &lib);
-    let dropped_in = transcript(&dropped_registry, &cfg);
-    assert_eq!(linked, dropped_in, "the two doors are not one module");
-
-    // Not a vacuous pass: each reference reached the responder and came back as the module reads it.
-    let text = linked.join("\n");
-    assert_eq!(linked[2], "Ok(sk-conformance)", "{text}");
-    assert_eq!(linked[3], "Ok(acme)", "{text}");
-    assert!(linked[4].contains("kind: NotFound"), "{text}");
-    assert!(
-        linked[5].contains("kind: NotFound") && linked[5].contains("404"),
-        "{text}"
+fn refresh(p: &Plugin<Secret>, settings: &str, token: &str) -> String {
+    let secrets = [octets(token.as_bytes())];
+    let mut f = Frame::new(
+        RefreshIn {
+            head: in_head(),
+            generation: 2,
+            settings: json(settings.as_bytes()),
+            secrets: secrets.as_ptr(),
+            secrets_len: secrets.len(),
+        },
+        out_head(),
     );
-    assert!(linked[6].contains("kind: Denied"), "{text}");
-    assert!(linked[7].contains("kind: Invalid"), "{text}");
-    assert!(linked[8].contains("kind: Invalid"), "{text}");
-    assert_eq!(linked[9], "Ok(sk-conformance)", "{text}");
+    spelled(&p.call(lc::REFRESH, &mut f))
+}
 
-    // RED ARM 1: the same cdylib under a different operator config (another token) is a different
-    // transcript — the read the linked door answered is now denied.
-    let other = transcript(&dropped_registry, &config(&addr, "s.someone-else"));
+fn resolve(p: &Plugin<Secret>, settings: &str) -> String {
+    let mut f = Frame::new(
+        ResolveIn {
+            head: in_head(),
+            settings: json(settings.as_bytes()),
+        },
+        ResolveOut {
+            head: out_head(),
+            secret: NO_BLOB,
+            error_kind: 0,
+            _reserved: 0,
+        },
+    );
+    let c = p.call(secret::slot::RESOLVE, &mut f);
+    format!("{} kind={}", spelled(&c), f.out.error_kind)
+}
+
+fn release(p: &Plugin<Secret>, lease: u64) -> String {
+    let mut f = Frame::new(
+        ReleaseIn {
+            head: in_head(),
+            lease,
+        },
+        out_head(),
+    );
+    spelled(&p.call(lc::RELEASE, &mut f))
+}
+
+fn tick(p: &Plugin<Secret>) -> String {
+    let mut f = Frame::new(
+        TickIn {
+            head: in_head(),
+            now_ns: 1,
+        },
+        TickOut {
+            head: out_head(),
+            next_tick_ns: 7,
+        },
+    );
+    let c = p.call(lc::TICK, &mut f);
+    format!("{} next={}", spelled(&c), f.out.next_tick_ns)
+}
+
+fn close(p: &Plugin<Secret>) -> String {
+    let mut f: Frame<InHead, OutHead> = Frame::new(in_head(), out_head());
+    spelled(&p.call(lc::CLOSE, &mut f))
+}
+
+const GOOD: &str = r#"{"addr":"http://vault.internal:8200/","token":{"env":"VAULT_TOKEN"}}"#;
+
+/// What one door does, as one comparable transcript.
+fn transcript(p: &Plugin<Secret>, settings: &str) -> serde_json::Value {
+    let validated: Vec<String> = [
+        "",
+        "  \n",
+        "{ this is not json",
+        r#"{"addr":"http://v"}"#,
+        r#"{"addr":"http://v","token":"t","tls":true}"#,
+        settings,
+    ]
+    .iter()
+    .map(|s| validate(p, s))
+    .collect();
+    let refused_open = open(p, settings, None);
+    let opened = open(p, settings, Some(TOKEN));
+    let resolved: Vec<String> = [
+        r#"{"field":"api_key"}"#,
+        r#"{"path":"kv/data/openai"}"#,
+        r#"{"path":"kv/data/openai#"}"#,
+        r#"{"path":"kv/data/openai","field":""}"#,
+        "[1]",
+        r#"{"path":"kv/data/openai#api_key"}"#,
+    ]
+    .iter()
+    .map(|s| resolve(p, s))
+    .collect();
+    serde_json::json!({
+        "name": p.name(),
+        "kind": format!("{:?}", p.kind()),
+        "max_inflight": p.max_inflight(),
+        "validate": validated,
+        "open_without_token": refused_open,
+        "open": opened,
+        "open_again": open(p, settings, Some(TOKEN)),
+        "resolve": resolved,
+        "release_unknown": release(p, 42),
+        "refresh_bad": refresh(p, "{}", TOKEN),
+        "refresh": refresh(p, settings, TOKEN),
+        "tick": tick(p),
+        "close": close(p),
+    })
+}
+
+/// The plugin answers as ONE plugin through either door, and the same image over another config
+/// does not compare equal.
+#[test]
+fn the_linked_and_the_dropped_in_vault_plugin_are_one_plugin() {
+    let d = dispatcher();
+    let linked = transcript(&linked(&d), GOOD);
+    let dropped_in = transcript(&dropped(&d), GOOD);
+    assert_eq!(linked, dropped_in, "the two doors are not one plugin");
+
+    let all = linked.to_string();
+    assert!(
+        !all.contains(TOKEN),
+        "a transcript carries the token: {all}"
+    );
+    assert_eq!(linked["name"], busbar_secret_vault::NAME);
+    assert_eq!(linked["kind"], "Secret");
+    assert_eq!(linked["max_inflight"], 64);
+    let mut validated = linked["validate"].clone();
+    let unknown = validated[4].as_str().unwrap().to_string();
+    assert!(
+        unknown.starts_with("Failed lease=false invalid hashicorp-vault plugin config: unknown field `tls`, expected one of `addr`, `token`, `ca_cert_pem`, `timeout_secs` at line 1 column "),
+        "{unknown}"
+    );
+    validated[4] = "UNKNOWN-FIELD".into();
+    assert_eq!(
+        validated,
+        serde_json::json!([
+            "Failed lease=false hashicorp-vault plugin requires config (addr, token); none provided",
+            "Failed lease=false hashicorp-vault plugin requires config (addr, token); none provided",
+            "Failed lease=false invalid hashicorp-vault plugin config: key must be a string at line 1 column 3",
+            "Failed lease=false invalid hashicorp-vault plugin config: missing field `token` at line 1 column 19",
+            "UNKNOWN-FIELD",
+            "Ready lease=false ",
+        ])
+    );
+    assert_eq!(
+        linked["open_without_token"],
+        "Failed lease=false invalid hashicorp-vault plugin config: `token` resolved to no secret material"
+    );
+    assert_eq!(linked["open"], "Ready lease=false ");
+    assert_eq!(
+        linked["open_again"], "Refused lease=false ",
+        "one open per instance"
+    );
+    let url = "http://vault.internal:8200/v1/kv/data/openai";
+    let mut resolved = linked["resolve"].clone();
+    let not_object = resolved[4].as_str().unwrap().to_string();
+    assert!(
+        not_object.starts_with("Failed lease=false secret settings are not a JSON object: invalid type: sequence, expected a map")
+            && not_object.ends_with(" kind=4"),
+        "{not_object}"
+    );
+    resolved[4] = "NOT-AN-OBJECT".into();
+    assert_eq!(
+        resolved,
+        serde_json::json!([
+            "Failed lease=false missing or non-string `path` in secret reference settings kind=4",
+            "Failed lease=false vault secret reference must name a field to extract: either add a `field` key, or suffix `path` with `#<field>` (e.g. \"kv/data/openai#api_key\"); got path \"kv/data/openai\" kind=4",
+            "Failed lease=false vault secret reference must name a field to extract: either add a `field` key, or suffix `path` with `#<field>` (e.g. \"kv/data/openai#api_key\"); got path \"kv/data/openai#\" kind=4",
+            "Failed lease=false `field` in secret reference settings must not be empty kind=4",
+            "NOT-AN-OBJECT",
+            format!("Failed lease=false request to Vault ({url}) failed: the host lends this plugin no http exchange for its declared need kind=2"),
+        ])
+    );
+    assert_eq!(linked["release_unknown"], "Refused lease=false ");
+    assert!(
+        linked["refresh_bad"]
+            .as_str()
+            .unwrap()
+            .starts_with("Failed lease=false invalid hashicorp-vault plugin config: missing field"),
+        "{}",
+        linked["refresh_bad"]
+    );
+    assert_eq!(linked["refresh"], "Ready lease=false ");
+    assert_eq!(linked["tick"], "Ready lease=false  next=0");
+    assert_eq!(linked["close"], "Ready lease=false ");
+
+    // RED: the same image opened over ANOTHER config answers another transcript.
+    let other = transcript(
+        &dropped(&d),
+        r#"{"addr":"https://elsewhere:8200","token":{"env":"VAULT_TOKEN"}}"#,
+    );
     assert_ne!(
         other, linked,
-        "a different config must not read as the same module"
+        "a door over another config must not compare equal"
     );
-    assert!(other[2].contains("kind: Denied"), "{other:?}");
+    assert_eq!(
+        other["validate"].as_array().unwrap()[..5],
+        linked["validate"].as_array().unwrap()[..5]
+    );
+}
 
-    // RED ARM 2: the same bytes signed as `auth` are refused at the kind handshake.
-    let wrong = dropped("as-auth", statement("auth"), &lib);
-    let e = match wrong.open_auth(ALIAS, &cfg) {
-        Ok(_) => panic!("a secret library signed as auth must not open"),
-        Err(e) => e,
-    };
+/// RED: the door asked for as another kind is refused, by either origin.
+#[test]
+fn a_wrong_kind_is_refused() {
+    let d = dispatcher();
+    let err = load_linked::<Export>(busbar_secret_vault::door::door, bind(&d))
+        .expect_err("a secret door is not an export door");
+    let said = format!("{err:?}");
+    assert!(said.contains("Secret") || said.contains("Kind"), "{said}");
+
+    let err = load_dropped::<Export>(
+        &cdylib(),
+        &ManifestFacts {
+            kind: KindCode::Export,
+            kind_abi: busbar_contract::abi::export::ABI_VERSION,
+            ..facts()
+        },
+        bind(&d),
+    )
+    .expect_err("the dropped-in secret door is not an export door");
+    assert!(!matches!(err, LoadError::ManifestKind { .. }), "{err:?}");
+}
+
+/// RED: a manifest whose statement disagrees with what is asked is refused before `dlopen`.
+#[test]
+fn a_statement_mismatch_is_refused() {
+    let d = dispatcher();
+    let err = load_dropped::<Secret>(
+        &cdylib(),
+        &ManifestFacts {
+            kind: KindCode::Export,
+            ..facts()
+        },
+        bind(&d),
+    )
+    .expect_err("a manifest stating another kind is refused");
+    assert!(matches!(err, LoadError::ManifestKind { .. }), "{err:?}");
+
+    // 1.5.5's secret ABI was v1: a manifest stating it is refused (THE DESIGN §11.8).
+    let err = load_dropped::<Secret>(
+        &cdylib(),
+        &ManifestFacts {
+            kind_abi: secret::ABI_VERSION - 1,
+            ..facts()
+        },
+        bind(&d),
+    )
+    .expect_err("a manifest stating 1.5.5's secret ABI is refused");
+    assert!(matches!(err, LoadError::ManifestKindAbi { .. }), "{err:?}");
+
+    let err = load_dropped::<Secret>(
+        &cdylib(),
+        &ManifestFacts {
+            mechanism_version: MECHANISM_VERSION + 1,
+            ..facts()
+        },
+        bind(&d),
+    )
+    .expect_err("a manifest stating another mechanism is refused");
     assert!(
-        e.contains(&format!(
-            "plugin '{NAME}' exports kind 'secret' but is being loaded as 'auth'"
-        )),
-        "{e}"
+        matches!(err, LoadError::ManifestMechanism { .. }),
+        "{err:?}"
     );
+}
+
+/// RED: a wrong config never opens, and an unopened instance serves no resolve.
+#[test]
+fn a_wrong_config_never_opens() {
+    let d = dispatcher();
+    for p in [linked(&d), dropped(&d)] {
+        assert!(open(&p, r#"{"addr":1,"token":"t"}"#, Some(TOKEN)).starts_with("Failed"));
+        assert!(!p.is_open());
+        assert!(resolve(&p, r#"{"path":"kv/data/x#k"}"#).starts_with("Refused"));
+    }
 }

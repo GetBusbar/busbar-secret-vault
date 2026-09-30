@@ -25,17 +25,18 @@ secrets engine over its HTTP API — a genuine client (no mock), reading
 one field out of a `kv-v2` entry and authenticating with a pre-obtained
 `X-Vault-Token`.
 
-It is a `cdylib` that implements busbar's `SecretModule` trait (via
+It exports the secret kind's door (via
 [`busbar-contract`](https://github.com/GetBusbar/busbar/tree/main/crates/busbar-contract))
-and is loaded in-process by busbar over the signed hybrid plugin ABI —
-`dlopen`'d, not spawned as a separate process.
+and is loaded in-process by busbar over the secret kind's memory ABI —
+compiled in, or `dlopen`'d as a signed cdylib, never a separate process.
 
 ## Versioning
 
 This plugin is versioned **independently of busbar** — `v1.0.0` here says
 nothing about which busbar release it is. Compatibility with busbar is
-stated separately: **requires busbar 1.5.0+** (the release that ships the
-signed hybrid plugin ABI this crate loads over). Pin both versions
+stated separately: **requires busbar 1.6.0+** (the release that ships the
+secret kind's memory ABI, v2, this crate loads over; 1.6.0 loads no 1.5.x
+build of this plugin). Pin both versions
 explicitly in production; do not assume they move together.
 
 ## What it is for
@@ -51,18 +52,27 @@ or an on-disk file.
 
 ## Design
 
-This repo brings 100% of what it needs — it is a 2-crate Cargo workspace,
-not a thin adapter pointing back at busbar for its real logic:
+This repo brings 100% of what it needs — a 2-crate Cargo workspace on the
+secret kind's **memory ABI** (`busbar_contract::abi::secret`):
 
-- **`secret-vault/`** (crate `busbar-secret-vault`) — the real Vault KV v2
-  HTTP client: field addressing, response-size capping, and 404/403/5xx
-  error classification. Usable statically, independent of the plugin ABI.
-- **`secret-vault-plugin/`** (crate `busbar-secret-vault-plugin`, `src/lib.rs`
-  ~45 lines) — the thin `cdylib` adapter: turns the engine's JSON
-  open-time config into a real `VaultSecretModule` (from the sibling
-  `busbar-secret-vault` crate, a same-repo path dependency) and hands the trait
-  object to the SDK, which emits the extern-C symbols the loader
-  resolves.
+- **`secret-vault/`** (crate `busbar-secret-vault`, `#![forbid(unsafe_code)]`)
+  — the sans-IO Vault KV v2 client (field addressing, the request it
+  sends, the 1 MiB response cap, and 404/403/5xx error classification)
+  and its door, `door::door`: every slot a safe SDK slot over the secret
+  kind's table. A busbar build that compiles the plugin in links this
+  crate and registers that door.
+- **`secret-vault-plugin/`** (crate `busbar-secret-vault-plugin`) — the
+  thin `cdylib` that exports the same door as `busbar_plugin_door`, so
+  compiled in or dropped in, the kernel reaches the same table.
+
+The plugin never opens a socket, dials or does TLS. Its one read goes
+through the host's framed one-shot http exchange over its declared need
+(`operator-infrastructure`, the target from `addr`, `ca_cert_pem` as an
+extra trusted root); a read that cannot finish now answers PENDING and
+the host re-invokes it on the wake. The token is the Statement's one
+secret reference: the kernel resolves `settings.token` through the
+bootstrap secret plugins and hands the material to `open`. Error texts
+name the path and the URL, never the token or the value.
 
 Auth is deliberately scoped to exactly one Vault auth method: a
 pre-obtained token sent as `X-Vault-Token` — Vault's simplest and most
@@ -78,7 +88,7 @@ the version CI uses. busbar is a pinned git dependency (see
 
 ```sh
 cargo build --release      # workspace build; cdylib at target/release/libbusbar_secret_vault_plugin.{so,dylib}
-cargo test                 # both crates' unit tests + the end-to-end loader/Vault test (see secret-vault-plugin/tests/e2e.rs)
+cargo test                 # unit tests + the linked/dropped-in conformance test (secret-vault-plugin/tests/conformance.rs)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -90,14 +100,11 @@ depends on it as a normal workspace path dependency (`../secret-vault`).
 
 The one [busbar](https://github.com/GetBusbar/busbar) crate either crate
 names is `busbar-contract` — the plugin contract, whose `abi::sdk` module
-carries the export macros. `busbar-plugin-loader` is a dev-dependency only,
-for the linked + dropped-in conformance test and the end-to-end test. Both
-are **git dependencies pinned to one busbar commit**: the `rev` in every
-`Cargo.toml` is field 1 of `.busbar-ref`, and CI's `pin` job refuses a
-manifest that disagrees. No sibling checkout of busbar is needed to build
-or test; the live end-to-end test (`tests/e2e.rs`) builds the real `busbar`
-binary from a checkout named by `BUSBAR_CHECKOUT` (CI's `e2e` job provides
-one at `.busbar-ref`).
+carries the door macros. `busbar-plugin-loader` is a dev-dependency only,
+for the linked + dropped-in conformance test. Both are **git dependencies
+pinned to one busbar commit**: the `rev` in every `Cargo.toml` is field 1
+of `.busbar-ref`, and CI's `pin` job refuses a manifest that disagrees.
+No sibling checkout of busbar is needed to build or test.
 
 ## Pack and sign
 
@@ -188,39 +195,25 @@ never an empty `Ok`.
 
 ## Tests
 
-`cargo test` (run at the workspace root) runs `busbar-secret-vault`'s own
-hermetic unit tests (reference-parsing, the response-size cap, and —
-gated on `BUSBAR_TEST_VAULT_ADDR`/`BUSBAR_TEST_VAULT_TOKEN` — a real
-round trip), `secret-vault-plugin`'s own hermetic unit tests (covering
-`open()`'s config-parsing responsibility: empty/malformed/
-missing-required-field/unknown-field config, all without any network
-I/O), and the end-to-end test in `secret-vault-plugin/tests/e2e.rs`.
+`cargo test` (run at the workspace root) runs:
 
-The end-to-end test is NOT a stub: it seeds a real secret directly into a
-real Vault dev-mode server via a raw HTTP PUT, then `dlopen`s the
-actually-built `busbar-secret-vault-plugin` cdylib over
-`busbar-plugin-loader`'s real `kind: secret` C ABI seam — the same seam
-busbar's engine uses — and reads that secret back through it. It proves,
-against a genuine Vault server:
-
-- both field-addressing forms (`#field` suffix and explicit `field` key)
-  resolve the correct value across the real C ABI;
-- a missing path surfaces as a distinct, loud 404 — never an empty `Ok`;
-- settings with no addressable field fail closed.
-
-It needs a real Vault dev-mode server:
+- `busbar-secret-vault`'s hermetic unit tests: reference parsing, the
+  request it builds, every 1.5.5 response class and its exact text, the
+  body cap, a pending exchange, the config refusals, and the door's
+  lease map (READY under a lease, zeroed on release, FAILED with its
+  `ERROR_KIND_*`, PENDING then resumed). One test reads a real Vault
+  dev-mode server, gated on `BUSBAR_TEST_VAULT_ADDR` /
+  `BUSBAR_TEST_VAULT_TOKEN` (hard-fails under `CI` when unset), through
+  the sans-IO client with a test-side HTTP exchange;
+- `secret-vault-plugin/tests/conformance.rs`: the linked door and the
+  built cdylib, loaded through busbar's real loader, driven through the
+  secret kind's table over one script and compared, with RED arms for a
+  wrong kind, a Statement mismatch and a wrong config.
 
 ```sh
 docker run --rm -p 8200:8200 --cap-add=IPC_LOCK -e VAULT_DEV_ROOT_TOKEN_ID=root hashicorp/vault
 BUSBAR_TEST_VAULT_ADDR=http://127.0.0.1:8200 BUSBAR_TEST_VAULT_TOKEN=root cargo test
 ```
-
-Without a running Vault, this test self-skips locally with a message —
-but hard-fails under CI (`CI` env var set) instead of silently skipping;
-this is the only over-the-ABI coverage of the real Vault-backed
-`kind: secret` dlopen seam and must never quietly vanish. CI boots a real
-`hashicorp/vault` dev-mode service container to provide it (see
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 ## License
 

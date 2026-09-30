@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# This repo brings 100% of what it needs: the real HashiCorp Vault KV v2 client logic
-# (secret-vault, crate busbar-secret-vault) and the thin dlopen ABI adapter that packages it as a
-# busbar plugin (secret-vault-plugin, crate busbar-secret-vault-plugin) both live here, as a
-# same-repo Cargo workspace — not split across this repo and busbar. Same layout as GetBusbar/busbar-auth-oidc.
+# One repo per plugin: the HashiCorp Vault secret plugin on the secret kind's memory ABI, as a
+# same-repo Cargo workspace — the logic and its door (secret-vault, crate busbar-secret-vault, the
+# rlib a busbar build links) and the thin cdylib that exports the same door dropped in
+# (secret-vault-plugin, crate busbar-secret-vault-plugin).
 #
-# Its one busbar dependency is busbar-contract (#40: a plugin names the contract only; the plugin
-# SDK is `busbar_contract::abi::sdk` since the #84 merge), plus busbar-plugin-loader dev-only for the
-# conformance and e2e tests — both `git` dependencies on GetBusbar/busbar pinned to the rev in
-# `.busbar-ref` field 1. No sibling-checkout path dependency ships in any manifest.
+# Its one busbar dependency is busbar-contract (#40), plus busbar-plugin-loader dev-only for the
+# conformance test — `git` dependencies on GetBusbar/busbar pinned to the rev in `.busbar-ref`
+# field 1. No sibling-checkout path dependency ships in any manifest.
 [workspace]
 resolver = "2"
 members = [

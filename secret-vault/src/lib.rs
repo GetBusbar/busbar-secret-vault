@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The **HashiCorp Vault** backend for busbar's `kind: secret` plugin family — the real thing
-//! `busbar-secret-example-plugin` stands in for (that crate is a hermetic in-memory-map TEST fixture,
-//! never a backend to run in production; see its doc comment). This crate is the reusable LOGIC
-//! (usable statically); the dynamic `cdylib` that exports the secret C ABI is the sibling
-//! `busbar-secret-vault-plugin` crate — the same split `busbar-auth-oidc` / `busbar-auth-oidc-plugin`
-//! already establishes for the auth seam.
+//! The **HashiCorp Vault** backend for busbar's `kind: secret` plugin family, on the secret kind's
+//! memory ABI (`busbar_contract::abi::secret`). This crate is the LOGIC and its door
+//! ([`door::door`]); the dropped-in `cdylib` is the sibling `busbar-secret-vault-plugin` crate,
+//! which exports the same door as `busbar_plugin_door`.
 //!
 //! ## What it does
 //!
@@ -21,75 +19,74 @@
 //! `path` is the FULL v1 API path including the KV v2 `data/` segment the engine requires (e.g.
 //! `kv/data/openai` for a `kv/` mount holding a secret at `openai`) — this crate does not itself
 //! prepend a mount or a `data/` segment; the operator's `path` is used verbatim after `{addr}/v1/`.
-//! Vault's own docs use exactly this convention, so an operator copying a path out of the Vault UI
-//! or `vault kv get` output can drop it in unchanged.
 //!
-//! A Vault KV v2 entry commonly holds MULTIPLE key/value pairs (e.g. `kv/data/openai` might hold both
-//! `api_key` and `org_id`), so a reference must name which field to extract. Two ways to say that, on
-//! the per-reference `settings` map `SecretModule::resolve` receives:
+//! A reference names the field to extract in one of two ways, on the per-reference `settings` map:
 //!
-//! - `{ "path": "kv/data/openai#api_key" }` — the `#field` suffix convention `docs/plugins.md`
-//!   already publishes as its Vault example. Matched here exactly: `path` is split on the LAST `#`.
-//! - `{ "path": "kv/data/openai", "field": "api_key" }` — the same thing spelled as two keys, for
-//!   operators/tooling that would rather not embed `#` inside a single string. When both `field` and
-//!   a `#`-suffixed `path` are given, `field` wins (see [`parse_reference`]).
+//! - `{ "path": "kv/data/openai#api_key" }` — the `#field` suffix; `path` is split on the LAST `#`.
+//! - `{ "path": "kv/data/openai", "field": "api_key" }` — two keys. When both are given, `field`
+//!   wins (see [`parse_reference`]).
+//!
+//! ## Sans-IO
+//!
+//! The plugin never opens a socket, dials or does TLS (THE DESIGN §5). [`VaultClient`] builds the
+//! one request ([`Request`]) and judges the one response ([`Response`]); the bytes travel through
+//! an [`Exchange`] — the host's framed one-shot http exchange over this plugin's declared need
+//! (`operator-infrastructure`, target from `addr`, extra trusted root from `ca_cert_pem`). An
+//! exchange that cannot finish now answers [`Exchanged::Pending`] and the op answers PENDING; the
+//! host re-invokes it on the wake and the same exchange answers its stored result.
 //!
 //! ## Auth
 //!
-//! Vault has many auth methods (AppRole, Kubernetes, LDAP, …). This crate implements exactly ONE,
-//! deliberately: a pre-obtained token sent as `X-Vault-Token` — Vault's simplest and most universal
-//! scheme, and the right initial scope (a dev-mode root token, or a real AppRole/Kubernetes-issued
-//! token an operator already holds and hands to busbar via `secrets.<module>.settings.token`, itself
-//! a secret reference resolved against the built-in `env`/`file` modules before it reaches here — see
-//! `busbar_config::SecretModuleCfg`). Implementing the AppRole login flow, Kubernetes auth, or any
-//! other method that itself needs a login round-trip is real scope creep for a first version and is
-//! left as a natural extension of THIS crate (`busbar-secret-vault`) — not the thin ABI adapter
-//! (`busbar-secret-vault-plugin`), which should stay a pass-through of whatever this crate grows.
+//! Exactly one Vault auth method: a pre-obtained token sent as `X-Vault-Token`. The token is a
+//! secret REFERENCE in `secrets.<module>.settings.token`; the kernel resolves it through the
+//! bootstrap secret plugins and hands the material to `open` (the Statement's `secret_refs`). The
+//! token never appears in an error text, a log line or a URL.
 //!
 //! ## Errors
 //!
-//! Fail-closed and specific, matching the rest of this codebase: a 404 (no secret at that path), a
-//! 403 (bad token / missing Vault policy), and a 5xx (Vault itself unhealthy) are surfaced as
-//! distinct, human-readable errors — never collapsed into a generic "resolve failed", and never an
-//! empty `Ok`.
+//! Fail-closed and specific, as 1.5.5: a 404 (no secret at that path), a 403 (bad token / missing
+//! Vault policy) and a 5xx (Vault itself unhealthy) are distinct, human-readable errors, each tagged
+//! with its `abi::secret::ERROR_KIND_*`.
 
-use busbar_contract::secret::{SecretModule, SecretModuleError, SecretResult};
+#![forbid(unsafe_code)]
+
+use busbar_contract::abi::secret::{
+    ERROR_KIND_DENIED, ERROR_KIND_INTERNAL, ERROR_KIND_INVALID, ERROR_KIND_NOT_FOUND,
+    ERROR_KIND_UNAVAILABLE,
+};
+use busbar_contract::secret::{SecretErrorKind, SecretModuleError, SecretResult};
 use serde::Deserialize;
-use std::io::Read;
-use std::time::Duration;
 
-/// Upper bound on a Vault KV v2 response body. A KV v2 entry is typically a handful of short fields
-/// (API keys, connection strings, small PEM blobs); this is generous headroom while still bounding
-/// the allocation against a hostile or misbehaving Vault endpoint.
-const MAX_VAULT_RESPONSE_BYTES: usize = 1024 * 1024;
+pub mod door;
 
-/// Default HTTP timeout (connect + total) for a Vault request. Secret resolution runs once per
-/// reference at boot/config-apply, off the request hot path, so a few seconds of headroom for a
-/// slow/cold Vault is fine — but it must still be BOUNDED so a hung Vault cannot hang boot forever.
+/// The plugin's name (the manifest name) and the `module` alias a reference spells.
+pub const NAME: &str = "busbar-secret-vault";
+
+/// Upper bound on a Vault KV v2 response body, as 1.5.5. A KV v2 entry is typically a handful of
+/// short fields; this is generous headroom while still bounding the allocation against a hostile
+/// or misbehaving Vault endpoint.
+pub const MAX_VAULT_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// The settings key whose value is the token's secret reference (the Statement's `secret_refs`).
+pub const TOKEN_KEY: &str = "token";
+
+/// Default HTTP timeout (connect + total), in seconds, as 1.5.5.
 fn default_timeout_secs() -> u64 {
     10
 }
 
-/// The `busbar-secret-vault-plugin`'s open-time config — the `secrets.<module>.settings` map
-/// `docs/plugins.md` describes as "the vault address + auth", passed through verbatim as JSON at
-/// `open()`. Distinct from the per-REFERENCE `settings` [`parse_reference`] parses.
+/// The open-time settings — the `secrets.<module>.settings` map, as 1.5.5 read it. `token` is its
+/// secret reference as written (the material arrives through `open`'s secrets, never here).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VaultConfig {
-    /// The Vault server address, e.g. `https://vault.internal:8200` (or `http://127.0.0.1:8200` for a
-    /// local dev-mode server). No trailing slash is required or stripped-twice; a trailing slash is
-    /// tolerated (trimmed at request time).
+    /// The Vault server address, e.g. `https://vault.internal:8200`. A trailing slash is tolerated.
     pub addr: String,
-    /// The Vault token sent as `X-Vault-Token` on every read. A real deployment should deliver this
-    /// as a secret reference in `config.yaml` (e.g. `{ env: VAULT_TOKEN }`), never a plaintext literal
-    /// — busbar's config layer resolves it against the built-in env/file modules before this struct
-    /// ever sees it (module-level settings cannot reference ANOTHER secret plugin — a bootstrap
-    /// cycle — only the built-ins).
-    pub token: String,
-    /// An ADDITIONAL trusted root CA certificate (PEM), layered on top of the built-in public root
-    /// store — mirrors `busbar_auth_oidc::OidcConfig::ca_cert_pem` exactly (same rationale: a
-    /// self-hosted Vault behind a corporate/internal CA whose TLS cert doesn't chain to a public
-    /// root). Never disables certificate validation, only widens the trusted-root set.
+    /// The token's secret reference, as the operator wrote it (required, as 1.5.5).
+    pub token: serde_json::Value,
+    /// An ADDITIONAL trusted root CA certificate (PEM), layered on top of the public root store.
+    /// Never disables certificate validation, only widens the trusted-root set. Carried to the
+    /// host as the need's `trust_from`.
     #[serde(default)]
     pub ca_cert_pem: Option<String>,
     /// HTTP timeout (connect + total), in seconds. Default 10.
@@ -97,24 +94,28 @@ pub struct VaultConfig {
     pub timeout_secs: u64,
 }
 
-/// Read `r` into a `Vec<u8>`, refusing anything over `cap` bytes. `take(cap + 1)`: read one byte past
-/// the cap so "exactly at the cap" and "over the cap" are distinguishable without trusting
-/// Content-Length (which a hostile or chunked response need not supply honestly). Mirrors
-/// `busbar_auth_oidc::reqwest_fetcher::read_capped`.
-fn read_capped(r: impl Read, cap: usize) -> Result<Vec<u8>, String> {
-    let mut buf = Vec::new();
-    r.take(cap as u64 + 1)
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("reading Vault response body failed: {e}"))?;
-    if buf.len() > cap {
-        return Err(format!("Vault response body exceeds the {cap}-byte cap"));
+/// Parse the open-time settings bytes, with 1.5.5's refusal texts: an empty (or whitespace-only)
+/// config and a malformed one are refused, naming the plugin.
+///
+/// # Errors
+/// The operator-facing refusal text.
+pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
+    let text = std::str::from_utf8(settings)
+        .map_err(|e| format!("invalid hashicorp-vault plugin config: {e}"))?;
+    if text.trim().is_empty() {
+        return Err(
+            "hashicorp-vault plugin requires config (addr, token); none provided".to_string(),
+        );
     }
-    Ok(buf)
+    serde_json::from_str(text).map_err(|e| format!("invalid hashicorp-vault plugin config: {e}"))
 }
 
-/// Split a per-reference `settings` map into `(vault_path, field)`. See the crate doc for the two
-/// accepted shapes. Fail-closed: a missing `path`, or a `path` with no `#field` suffix and no
-/// separate `field` key, is an `Err` naming exactly what's missing.
+/// Split a per-reference `settings` map into `(vault_path, field)`. Fail-closed: a missing `path`,
+/// or a `path` with no `#field` suffix and no separate `field` key, is an `Err` naming exactly
+/// what's missing. Texts are 1.5.5's.
+///
+/// # Errors
+/// [`SecretErrorKind::Invalid`], naming what is missing.
 pub fn parse_reference(
     settings: &serde_json::Map<String, serde_json::Value>,
 ) -> SecretResult<(String, String)> {
@@ -125,8 +126,7 @@ pub fn parse_reference(
             SecretModuleError::invalid("missing or non-string `path` in secret reference settings")
         })?;
 
-    // Explicit `field` wins over any `#` embedded in `path` — the two-key spelling is meant to be
-    // usable even against a path that (unusually) contains a literal `#`.
+    // Explicit `field` wins over any `#` embedded in `path`.
     if let Some(field) = settings.get("field").and_then(|v| v.as_str()) {
         if field.is_empty() {
             return Err(SecretModuleError::invalid(
@@ -145,120 +145,255 @@ pub fn parse_reference(
     }
 }
 
-/// The real Vault-backed [`SecretModule`]: one HTTP client, the resolved `addr`, and the token, built
-/// once at `open()` and reused for every `resolve()` call (module instances are stateless per call,
-/// but the connection/config is not — see `busbar_contract::secret::SecretModule`'s doc).
-pub struct VaultSecretModule {
-    client: reqwest::blocking::Client,
+/// A `resolve`'s settings blob as an object (empty = `{}`).
+///
+/// # Errors
+/// [`SecretErrorKind::Invalid`]: the bytes are not a JSON object.
+pub fn settings_of(bytes: &[u8]) -> SecretResult<serde_json::Map<String, serde_json::Value>> {
+    if bytes.is_empty() {
+        return Ok(serde_json::Map::new());
+    }
+    serde_json::from_slice(bytes).map_err(|e| {
+        SecretModuleError::invalid(format!("secret settings are not a JSON object: {e}"))
+    })
+}
+
+/// The `abi::secret::ERROR_KIND_*` code of a [`SecretErrorKind`].
+#[must_use]
+pub const fn error_kind(kind: SecretErrorKind) -> u32 {
+    match kind {
+        SecretErrorKind::NotFound => ERROR_KIND_NOT_FOUND,
+        SecretErrorKind::Unavailable => ERROR_KIND_UNAVAILABLE,
+        SecretErrorKind::Denied => ERROR_KIND_DENIED,
+        SecretErrorKind::Invalid => ERROR_KIND_INVALID,
+        SecretErrorKind::Internal => ERROR_KIND_INTERNAL,
+    }
+}
+
+/// ONE framed http request, as the plugin hands it to the host's exchange. The token rides as a
+/// head field; `Debug` never prints field values.
+pub struct Request {
+    /// The method (`GET`).
+    pub method: &'static str,
+    /// The full target URL, `{addr}/v1/{path}`. Carries no secret.
+    pub url: String,
+    /// The head fields: `X-Vault-Token`.
+    pub fields: Vec<(&'static str, Vec<u8>)>,
+    /// The connect + total timeout, in milliseconds.
+    pub timeout_ms: u64,
+    /// The extra trusted root (PEM) the need's `trust_from` names; `None` = the public roots.
+    pub trust_pem: Option<String>,
+    /// The body cap: the response body buffer the exchange fills.
+    pub body_cap: usize,
+}
+
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field(
+                "fields",
+                &self.fields.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            )
+            .field("timeout_ms", &self.timeout_ms)
+            .field("trust_pem", &self.trust_pem.is_some())
+            .field("body_cap", &self.body_cap)
+            .finish()
+    }
+}
+
+/// ONE framed http response, as the exchange answers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Response {
+    /// The status code.
+    pub status: u16,
+    /// The body, at most the request's `body_cap` bytes.
+    pub body: Vec<u8>,
+    /// The body's full length (the short-buffer rule's `needed`); over `body_cap` = too big.
+    pub body_len: usize,
+}
+
+/// What an exchange answered for one call.
+#[derive(Debug)]
+pub enum Exchanged {
+    /// Not ready: the host fires the op's wake when it is, and the op is re-invoked.
+    Pending,
+    /// The response, or the transport's failure text (never secret material).
+    Done(Result<Response, String>),
+}
+
+/// The host's framed one-shot http exchange, as the plugin sees it. `ticket` names the op: a
+/// re-invoked op asking again on the same ticket receives the stored result, never a second
+/// request.
+pub trait Exchange {
+    /// Run (or collect) the exchange for `ticket`.
+    fn exchange(&self, ticket: (u32, u32), request: &Request) -> Exchanged;
+}
+
+/// The Vault client: the resolved `addr`, the token material and the transport settings, built
+/// once at `open` (and at `refresh`) and reused for every `resolve`.
+pub struct VaultClient {
     addr: String,
-    token: String,
+    token: Vec<u8>,
+    timeout_secs: u64,
+    ca_cert_pem: Option<String>,
 }
 
-impl VaultSecretModule {
-    /// Build the module from parsed config. Fails closed on a malformed `ca_cert_pem` or an
-    /// unbuildable HTTP client — never returns a module that would silently no-op.
-    pub fn new(cfg: &VaultConfig) -> Result<Self, String> {
-        let timeout = Duration::from_secs(cfg.timeout_secs);
-        let mut builder = reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .connect_timeout(timeout);
-        if let Some(pem) = &cfg.ca_cert_pem {
-            let cert = reqwest::Certificate::from_pem(pem.as_bytes())
-                .map_err(|e| format!("invalid ca_cert_pem: {e}"))?;
-            builder = builder.add_root_certificate(cert);
-        }
-        let client = builder
-            .build()
-            .map_err(|e| format!("failed to build Vault HTTP client: {e}"))?;
-        Ok(Self {
-            client,
+impl std::fmt::Debug for VaultClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultClient")
+            .field("addr", &self.addr)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("ca_cert_pem", &self.ca_cert_pem.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for VaultClient {
+    fn drop(&mut self) {
+        self.token.fill(0);
+    }
+}
+
+impl VaultClient {
+    /// The client for `cfg`, with the token material the kernel resolved.
+    #[must_use]
+    pub fn new(cfg: &VaultConfig, token: &[u8]) -> Self {
+        Self {
             addr: cfg.addr.trim_end_matches('/').to_string(),
-            token: cfg.token.clone(),
-        })
-    }
-
-    /// Read one field out of a Vault KV v2 entry at `vault_path` (the full v1 API path, `data/`
-    /// segment included — see the crate doc). Distinct status codes get distinct, specific errors:
-    /// 404 (no secret there), 403 (bad token / missing policy), 5xx (Vault itself unhealthy), any
-    /// other non-2xx (surfaced verbatim with the status and a body excerpt).
-    fn read_field(&self, vault_path: &str, field: &str) -> SecretResult<Vec<u8>> {
-        let url = format!("{}/v1/{}", self.addr, vault_path.trim_start_matches('/'));
-        let resp = self
-            .client
-            .get(&url)
-            .header("X-Vault-Token", &self.token)
-            .send()
-            .map_err(|e| {
-                SecretModuleError::unavailable(format!("request to Vault ({url}) failed: {e}"))
-            })?;
-
-        let status = resp.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(SecretModuleError::not_found(format!(
-                "Vault has no secret at path {vault_path:?} (404 from {url})"
-            )));
-        }
-        if status == reqwest::StatusCode::FORBIDDEN {
-            return Err(SecretModuleError::denied(format!(
-                "Vault denied reading path {vault_path:?} (403 from {url}): check the token is \
-                 valid and its policy grants read on this path"
-            )));
-        }
-        if status.is_server_error() {
-            return Err(SecretModuleError::unavailable(format!(
-                "Vault server error reading path {vault_path:?}: HTTP {status} from {url}"
-            )));
-        }
-
-        let body = read_capped(resp, MAX_VAULT_RESPONSE_BYTES).map_err(|e| {
-            SecretModuleError::unavailable(format!("{e} (path {vault_path:?}, {url})"))
-        })?;
-
-        if !status.is_success() {
-            let excerpt: String = String::from_utf8_lossy(&body).chars().take(300).collect();
-            return Err(SecretModuleError::internal(format!(
-                "Vault returned HTTP {status} reading path {vault_path:?} ({url}): {excerpt}"
-            )));
-        }
-
-        let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
-            SecretModuleError::internal(format!(
-                "Vault response for path {vault_path:?} is not valid JSON: {e}"
-            ))
-        })?;
-        let data = v
-            .get("data")
-            .and_then(|d| d.get("data"))
-            .and_then(|d| d.as_object())
-            .ok_or_else(|| {
-                SecretModuleError::invalid(format!(
-                    "Vault response for path {vault_path:?} has no `data.data` object (not a KV v2 \
-                     read? check the path includes the `data/` segment, e.g. \"mount/data/name\")"
-                ))
-            })?;
-
-        let value = data.get(field).ok_or_else(|| {
-            let available: Vec<&str> = data.keys().map(String::as_str).collect();
-            SecretModuleError::not_found(format!(
-                "Vault secret at path {vault_path:?} has no field {field:?}; available fields: \
-                 {available:?}"
-            ))
-        })?;
-
-        match value {
-            serde_json::Value::String(s) => Ok(s.clone().into_bytes()),
-            other => Ok(other.to_string().into_bytes()),
+            token: token.to_vec(),
+            timeout_secs: cfg.timeout_secs,
+            ca_cert_pem: cfg.ca_cert_pem.clone(),
         }
     }
-}
 
-impl SecretModule for VaultSecretModule {
-    fn resolve(
+    /// The URL a read of `vault_path` goes to.
+    #[must_use]
+    pub fn url(&self, vault_path: &str) -> String {
+        format!("{}/v1/{}", self.addr, vault_path.trim_start_matches('/'))
+    }
+
+    /// The one request a read of `vault_path` sends.
+    #[must_use]
+    pub fn request(&self, vault_path: &str) -> Request {
+        Request {
+            method: "GET",
+            url: self.url(vault_path),
+            fields: vec![("X-Vault-Token", self.token.clone())],
+            timeout_ms: self.timeout_secs.saturating_mul(1000),
+            trust_pem: self.ca_cert_pem.clone(),
+            // One byte past the cap tells "at the cap" from "over it" even if the host reports no
+            // full length.
+            body_cap: MAX_VAULT_RESPONSE_BYTES + 1,
+        }
+    }
+
+    /// Resolve `settings` (a reference) through `exchange` for the op on `ticket`: `None` while
+    /// the exchange is pending.
+    pub fn resolve(
         &self,
         settings: &serde_json::Map<String, serde_json::Value>,
-    ) -> SecretResult<Vec<u8>> {
-        let (path, field) = parse_reference(settings)?;
-        self.read_field(&path, &field)
+        exchange: &dyn Exchange,
+        ticket: (u32, u32),
+    ) -> Option<SecretResult<Vec<u8>>> {
+        let (path, field) = match parse_reference(settings) {
+            Ok(r) => r,
+            Err(e) => return Some(Err(e)),
+        };
+        let request = self.request(&path);
+        match exchange.exchange(ticket, &request) {
+            Exchanged::Pending => None,
+            Exchanged::Done(result) => Some(judge(&path, &field, &request.url, result)),
+        }
+    }
+}
+
+/// `http`'s status rendering (`"404 Not Found"`), the text 1.5.5's client printed.
+fn status_text(status: u16) -> String {
+    match http::StatusCode::from_u16(status) {
+        Ok(s) => s.to_string(),
+        Err(_) => format!("{status} <unknown status code>"),
+    }
+}
+
+/// Judge one exchange's outcome for a read of `field` at `vault_path` from `url`, with 1.5.5's
+/// classes and texts, in 1.5.5's order: transport failure, 404, 403, 5xx, the body cap, any other
+/// non-2xx, then the KV v2 shape and the field.
+///
+/// # Errors
+/// The classified refusal; its text never carries the token or the material.
+pub fn judge(
+    vault_path: &str,
+    field: &str,
+    url: &str,
+    result: Result<Response, String>,
+) -> SecretResult<Vec<u8>> {
+    let resp = result.map_err(|e| {
+        SecretModuleError::unavailable(format!("request to Vault ({url}) failed: {e}"))
+    })?;
+    let status = resp.status;
+    if status == 404 {
+        return Err(SecretModuleError::not_found(format!(
+            "Vault has no secret at path {vault_path:?} (404 from {url})"
+        )));
+    }
+    if status == 403 {
+        return Err(SecretModuleError::denied(format!(
+            "Vault denied reading path {vault_path:?} (403 from {url}): check the token is \
+             valid and its policy grants read on this path"
+        )));
+    }
+    if (500..600).contains(&status) {
+        return Err(SecretModuleError::unavailable(format!(
+            "Vault server error reading path {vault_path:?}: HTTP {} from {url}",
+            status_text(status)
+        )));
+    }
+
+    let cap = MAX_VAULT_RESPONSE_BYTES;
+    if resp.body_len.max(resp.body.len()) > cap {
+        return Err(SecretModuleError::unavailable(format!(
+            "Vault response body exceeds the {cap}-byte cap (path {vault_path:?}, {url})"
+        )));
+    }
+    let body = resp.body;
+
+    if !(200..300).contains(&status) {
+        let excerpt: String = String::from_utf8_lossy(&body).chars().take(300).collect();
+        return Err(SecretModuleError::internal(format!(
+            "Vault returned HTTP {} reading path {vault_path:?} ({url}): {excerpt}",
+            status_text(status)
+        )));
+    }
+
+    let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
+        SecretModuleError::internal(format!(
+            "Vault response for path {vault_path:?} is not valid JSON: {e}"
+        ))
+    })?;
+    let data = v
+        .get("data")
+        .and_then(|d| d.get("data"))
+        .and_then(|d| d.as_object())
+        .ok_or_else(|| {
+            SecretModuleError::invalid(format!(
+                "Vault response for path {vault_path:?} has no `data.data` object (not a KV v2 \
+                 read? check the path includes the `data/` segment, e.g. \"mount/data/name\")"
+            ))
+        })?;
+
+    let value = data.get(field).ok_or_else(|| {
+        let available: Vec<&str> = data.keys().map(String::as_str).collect();
+        SecretModuleError::not_found(format!(
+            "Vault secret at path {vault_path:?} has no field {field:?}; available fields: \
+             {available:?}"
+        ))
+    })?;
+
+    match value {
+        serde_json::Value::String(s) => Ok(s.clone().into_bytes()),
+        other => Ok(other.to_string().into_bytes()),
     }
 }
 
