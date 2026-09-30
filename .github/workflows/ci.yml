@@ -21,4 +21,7 @@ jobs:
       busbar_checkout: false
       macos_test: "cargo test --workspace --locked --lib --test conformance -- --skip roundtrip_against_live_vault"
       extra_test: ""
+      plugin_crate: busbar-secret-vault-plugin
+      plugin_kind: secret
+      plugin_alias: vault
     secrets: inherit

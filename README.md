@@ -10,6 +10,8 @@ The HashiCorp Vault secret backend as a droppable busbar plugin: a cdylib export
 [![ci](https://github.com/GetBusbar/busbar-secret-vault/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-secret-vault/actions/workflows/ci.yml)
 <!-- fleet:header:end -->
 
+## What it is for
+
 **This plugin's version: v1.0.0.** (Independently versioned from busbar
 itself — see [Versioning](#versioning) below.)
 
@@ -30,7 +32,7 @@ It exports the secret kind's door (via
 and is loaded in-process by busbar over the secret kind's memory ABI —
 compiled in, or `dlopen`'d as a signed cdylib, never a separate process.
 
-## Versioning
+### Versioning
 
 This plugin is versioned **independently of busbar** — `v1.0.0` here says
 nothing about which busbar release it is. Compatibility with busbar is
@@ -39,7 +41,6 @@ secret kind's memory ABI, v2, this crate loads over; 1.6.0 loads no 1.5.x
 build of this plugin). Pin both versions
 explicitly in production; do not assume they move together.
 
-## What it is for
 
 Every secret value in busbar's config — a provider `api_key`,
 `auth.signing_key`, the admin token, a TLS `cert`/`key`/`client_ca` — is a
@@ -50,7 +51,7 @@ from a real Vault server through the same signed-plugin trust pipeline —
 the plugin you reach for when key material must never sit in an env var
 or an on-disk file.
 
-## Design
+### Design
 
 This repo brings 100% of what it needs — a 2-crate Cargo workspace on the
 secret kind's **memory ABI** (`busbar_contract::abi::secret`):
@@ -80,6 +81,40 @@ universal scheme, and the right initial surface for a first version.
 AppRole/Kubernetes login flows are a natural future extension of
 `busbar-secret-vault` itself, not the thin ABI adapter.
 
+## Config
+
+### Module open-time config (`secrets.<alias>.settings`)
+
+| Setting | Required | Default | Notes |
+|---|---|---|---|
+| `addr` | yes | — | The Vault server address, e.g. `https://vault.internal:8200` (or `http://127.0.0.1:8200` for a local dev-mode server). |
+| `token` | yes | — | The Vault token sent as `X-Vault-Token` on every read. Should be delivered as a secret reference (`{ env: VAULT_TOKEN }`), never a plaintext literal — module-level settings cannot reference another secret plugin, only the built-in `env`/`file` modules. |
+| `ca_cert_pem` | no | — | An additional trusted root CA (PEM), layered on top of the built-in public root store — for a self-hosted Vault behind a private CA. Never disables certificate validation. |
+| `timeout_secs` | no | `10` | HTTP timeout (connect + total), in seconds. |
+
+Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
+stray key fails loudly at boot instead of being silently ignored.
+
+### Per-reference settings (`{ module: vault, settings: {...} }`)
+
+A Vault KV v2 entry commonly holds multiple key/value pairs (e.g.
+`kv/data/openai` might hold both `api_key` and `org_id`), so a reference
+must name which field to extract, in one of two equivalent forms:
+
+| Form | Example |
+|---|---|
+| `#field` suffix on `path` | `{ "path": "kv/data/openai#api_key" }` |
+| separate `field` key | `{ "path": "kv/data/openai", "field": "api_key" }` |
+
+If both are given, the explicit `field` key wins. `path` is used verbatim
+after `{addr}/v1/` — this plugin never prepends a mount or a `data/`
+segment itself.
+
+A 404 (no secret at that path), a 403 (bad token / missing Vault
+policy), and a 5xx (Vault itself unhealthy) each surface as a distinct,
+specific error — never collapsed into a generic "resolve failed", and
+never an empty `Ok`.
+
 ## Build
 
 Needs a Rust toolchain ([rustup](https://rustup.rs)); `rust-toolchain.toml` pins
@@ -93,7 +128,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-## Dependencies
+### Dependencies
 
 `busbar-secret-vault` (`secret-vault/`) is a same-repo crate; `secret-vault-plugin`
 depends on it as a normal workspace path dependency (`../secret-vault`).
@@ -106,7 +141,7 @@ pinned to one busbar commit**: the `rev` in every `Cargo.toml` is field 1
 of `.busbar-ref`, and CI's `pin` job refuses a manifest that disagrees.
 No sibling checkout of busbar is needed to build or test.
 
-## Pack and sign
+### Pack and sign
 
 Once built, the cdylib is packed and signed like any other busbar plugin
 — see
@@ -158,40 +193,6 @@ v1 API path INCLUDING the KV v2 `data/` segment (exactly what `vault kv
 get`/the Vault UI show), with the field to extract named either as a
 `#field` suffix (as above) or a separate `field` key — see
 [Config](#config) below for both forms.
-
-## Config
-
-### Module open-time config (`secrets.<alias>.settings`)
-
-| Setting | Required | Default | Notes |
-|---|---|---|---|
-| `addr` | yes | — | The Vault server address, e.g. `https://vault.internal:8200` (or `http://127.0.0.1:8200` for a local dev-mode server). |
-| `token` | yes | — | The Vault token sent as `X-Vault-Token` on every read. Should be delivered as a secret reference (`{ env: VAULT_TOKEN }`), never a plaintext literal — module-level settings cannot reference another secret plugin, only the built-in `env`/`file` modules. |
-| `ca_cert_pem` | no | — | An additional trusted root CA (PEM), layered on top of the built-in public root store — for a self-hosted Vault behind a private CA. Never disables certificate validation. |
-| `timeout_secs` | no | `10` | HTTP timeout (connect + total), in seconds. |
-
-Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
-stray key fails loudly at boot instead of being silently ignored.
-
-### Per-reference settings (`{ module: vault, settings: {...} }`)
-
-A Vault KV v2 entry commonly holds multiple key/value pairs (e.g.
-`kv/data/openai` might hold both `api_key` and `org_id`), so a reference
-must name which field to extract, in one of two equivalent forms:
-
-| Form | Example |
-|---|---|
-| `#field` suffix on `path` | `{ "path": "kv/data/openai#api_key" }` |
-| separate `field` key | `{ "path": "kv/data/openai", "field": "api_key" }` |
-
-If both are given, the explicit `field` key wins. `path` is used verbatim
-after `{addr}/v1/` — this plugin never prepends a mount or a `data/`
-segment itself.
-
-A 404 (no secret at that path), a 403 (bad token / missing Vault
-policy), and a 5xx (Vault itself unhealthy) each surface as a distinct,
-specific error — never collapsed into a generic "resolve failed", and
-never an empty `Ok`.
 
 ## Tests
 
