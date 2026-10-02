@@ -13,17 +13,20 @@
 //! every malformed reference and a well-formed one, `release` of a lease never granted, `refresh`
 //! refused and accepted, `tick`, `close`. The two transcripts must be equal.
 //!
+//! The dropped-in door is admitted against the Statement rendering `busbar-plugin-pack` signs into
+//! its manifest (`rendering_of_library`, read off the built cdylib); the linked row states its own
+//! (`LinkedRow::of`). The two renderings must be equal byte for byte.
+//!
 //! THE RED ARMS, same file: the door asked for as another kind is refused; a manifest stating
 //! another kind, or 1.5.5's secret ABI version, is refused before `dlopen` (a Statement mismatch);
 //! the dropped-in door opened over ANOTHER config answers a different transcript (so the equality
 //! is not vacuous); an `open` with no token material is refused. A missing cdylib PANICS — this test
 //! IS the dropped-in door's proof, and never skips.
 //!
-//! NOT YET HELD HERE, and why (ARCHITECT rulings R2/R2a, 2026-09-30): the undeclared-need and
-//! cross-instance `ConnId` arms need the need declaration (KIND-SHARE), the loader filling
-//! `HostTables.conns` (BOOT-CHAIN) and the SDK's safe `exchange()`; on this rev no instance is lent
-//! a connector, so the well-formed resolve answers UNAVAILABLE naming that — the same through both
-//! doors. The secret axis (`SecretRows`) that would open the plugin by module name through the
+//! NOT YET HELD HERE: the undeclared-need and cross-instance `ConnId` arms need this plugin's need
+//! declaration and its resolve over the SDK's `exchange()`; the plugin declares no need yet, so no
+//! instance is lent a connector and the well-formed resolve answers UNAVAILABLE naming that — the
+//! same through both doors. The secret axis (`SecretRows`) that would open the plugin by module name through the
 //! registry is WIRE-SECRET's; this test drives the table through the loader's typed `Plugin`.
 
 use std::path::PathBuf;
@@ -34,13 +37,14 @@ use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, BLOB_JSON, BL
 use busbar_contract::abi::mechanism::lifecycle::{
     slot as lc, OpenIn, OpenOut, RefreshIn, ReleaseIn, TickIn, TickOut, ValidateIn,
 };
+use busbar_contract::abi::mechanism::rendering::RENDERING_MAGIC;
 use busbar_contract::abi::mechanism::{KindCode, MECHANISM_VERSION};
 use busbar_contract::abi::secret::{self, ResolveIn, ResolveOut};
 use busbar_plugin_loader::dispatch::kinds::export::Export;
 use busbar_plugin_loader::dispatch::kinds::secret::Secret;
 use busbar_plugin_loader::dispatch::{
-    in_head, load_dropped, load_linked, out_head, Bind, Called, DispatchConfig, Dispatcher, Frame,
-    LoadError, ManifestFacts, NoSink, Plugin, NO_BLOB,
+    in_head, load_dropped, load_linked, out_head, rendering_of_library, Bind, Called,
+    DispatchConfig, Dispatcher, Frame, LinkedRow, LoadError, NoSink, Plugin, NO_BLOB,
 };
 
 /// The token the kernel resolved; no transcript line may carry it.
@@ -63,13 +67,22 @@ fn cdylib() -> PathBuf {
         .unwrap_or_else(|| panic!("the busbar-secret-vault-plugin cdylib ({file}) is not built"))
 }
 
-/// What the signed manifest states for the dropped-in image.
-fn facts() -> ManifestFacts {
-    ManifestFacts {
-        mechanism_version: MECHANISM_VERSION,
-        kind: KindCode::Secret,
-        kind_abi: secret::ABI_VERSION,
+/// The Statement rendering the signed manifest states for the dropped-in image, as
+/// `busbar-plugin-pack` reads it off the built cdylib.
+fn stated() -> Vec<u8> {
+    rendering_of_library(&cdylib())
+        .expect("the cdylib's Statement renders")
+        .expect("the cdylib exports busbar_plugin_door")
+}
+
+/// [`stated`] with head words (0 mechanism version, 1 kind, 2 kind ABI, after the magic) replaced.
+fn stating(words: &[(usize, u32)]) -> Vec<u8> {
+    let mut r = stated();
+    for &(word, value) in words {
+        let at = RENDERING_MAGIC.len() + 4 * word;
+        r[at..at + 4].copy_from_slice(&value.to_le_bytes());
     }
+    r
 }
 
 /// The process's dispatcher, as the composition root builds one.
@@ -83,18 +96,21 @@ fn dispatcher() -> Arc<Dispatcher> {
 
 fn bind(d: &Dispatcher) -> Bind {
     Bind {
+        instance: Arc::from("vault"),
         max_inflight_cap: 64,
         sink: Arc::new(NoSink),
         dispatcher: d.adopter(),
+        conns: None,
     }
 }
 
 fn linked(d: &Dispatcher) -> Plugin<Secret> {
-    load_linked::<Secret>(busbar_secret_vault::door::door, bind(d)).expect("the linked door loads")
+    let row = LinkedRow::of(busbar_secret_vault::door::door).expect("the linked row states");
+    load_linked::<Secret>(&row, bind(d)).expect("the linked door loads")
 }
 
 fn dropped(d: &Dispatcher) -> Plugin<Secret> {
-    load_dropped::<Secret>(&cdylib(), &facts(), bind(d)).expect("the dropped-in door loads")
+    load_dropped::<Secret>(&cdylib(), &stated(), bind(d)).expect("the dropped-in door loads")
 }
 
 fn json(bytes: &[u8]) -> Blob {
@@ -130,6 +146,8 @@ fn validate(p: &Plugin<Secret>, settings: &str) -> String {
         ValidateIn {
             head: in_head(),
             settings: json(settings.as_bytes()),
+            err_buf: std::ptr::null_mut(),
+            err_cap: 0,
         },
         out_head(),
     );
@@ -146,10 +164,13 @@ fn open(p: &Plugin<Secret>, settings: &str, token: Option<&str>) -> String {
             secrets: secrets.as_ptr(),
             secrets_len: secrets.len(),
             generation: 1,
+            err_buf: std::ptr::null_mut(),
+            err_cap: 0,
         },
         OpenOut {
             head: out_head(),
             instance: std::ptr::null_mut(),
+            err_len: 0,
         },
     );
     spelled(&p.call(lc::OPEN, &mut f))
@@ -267,6 +288,13 @@ fn transcript(p: &Plugin<Secret>, settings: &str) -> serde_json::Value {
 /// does not compare equal.
 #[test]
 fn the_linked_and_the_dropped_in_vault_plugin_are_one_plugin() {
+    assert_eq!(
+        LinkedRow::of(busbar_secret_vault::door::door)
+            .expect("the linked row states")
+            .statement,
+        stated(),
+        "the linked and the dropped-in door state different Statements"
+    );
     let d = dispatcher();
     let linked = transcript(&linked(&d), GOOD);
     let dropped_in = transcript(&dropped(&d), GOOD);
@@ -359,21 +387,18 @@ fn the_linked_and_the_dropped_in_vault_plugin_are_one_plugin() {
 #[test]
 fn a_wrong_kind_is_refused() {
     let d = dispatcher();
-    let err = load_linked::<Export>(busbar_secret_vault::door::door, bind(&d))
-        .expect_err("a secret door is not an export door");
+    let row = LinkedRow::of(busbar_secret_vault::door::door).expect("the linked row states");
+    let err =
+        load_linked::<Export>(&row, bind(&d)).expect_err("a secret door is not an export door");
     let said = format!("{err:?}");
     assert!(said.contains("Secret") || said.contains("Kind"), "{said}");
 
-    let err = load_dropped::<Export>(
-        &cdylib(),
-        &ManifestFacts {
-            kind: KindCode::Export,
-            kind_abi: busbar_contract::abi::export::ABI_VERSION,
-            ..facts()
-        },
-        bind(&d),
-    )
-    .expect_err("the dropped-in secret door is not an export door");
+    let as_export = stating(&[
+        (1, KindCode::Export as u32),
+        (2, busbar_contract::abi::export::ABI_VERSION),
+    ]);
+    let err = load_dropped::<Export>(&cdylib(), &as_export, bind(&d))
+        .expect_err("the dropped-in secret door is not an export door");
     assert!(!matches!(err, LoadError::ManifestKind { .. }), "{err:?}");
 }
 
@@ -383,10 +408,7 @@ fn a_statement_mismatch_is_refused() {
     let d = dispatcher();
     let err = load_dropped::<Secret>(
         &cdylib(),
-        &ManifestFacts {
-            kind: KindCode::Export,
-            ..facts()
-        },
+        &stating(&[(1, KindCode::Export as u32)]),
         bind(&d),
     )
     .expect_err("a manifest stating another kind is refused");
@@ -395,24 +417,14 @@ fn a_statement_mismatch_is_refused() {
     // 1.5.5's secret ABI was v1: a manifest stating it is refused (THE DESIGN §11.8).
     let err = load_dropped::<Secret>(
         &cdylib(),
-        &ManifestFacts {
-            kind_abi: secret::ABI_VERSION - 1,
-            ..facts()
-        },
+        &stating(&[(2, secret::ABI_VERSION - 1)]),
         bind(&d),
     )
     .expect_err("a manifest stating 1.5.5's secret ABI is refused");
     assert!(matches!(err, LoadError::ManifestKindAbi { .. }), "{err:?}");
 
-    let err = load_dropped::<Secret>(
-        &cdylib(),
-        &ManifestFacts {
-            mechanism_version: MECHANISM_VERSION + 1,
-            ..facts()
-        },
-        bind(&d),
-    )
-    .expect_err("a manifest stating another mechanism is refused");
+    let err = load_dropped::<Secret>(&cdylib(), &stating(&[(0, MECHANISM_VERSION + 1)]), bind(&d))
+        .expect_err("a manifest stating another mechanism is refused");
     assert!(
         matches!(err, LoadError::ManifestMechanism { .. }),
         "{err:?}"

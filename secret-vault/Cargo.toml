@@ -16,7 +16,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 # The ONE busbar crate a plugin names (#40: contract only), pinned by git rev to `.busbar-ref`.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "23d8a6b46deb158839df8bc02115b09023633040" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The status rendering 1.5.5's errors printed ("503 Service Unavailable"): the same `http` crate
