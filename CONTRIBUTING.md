@@ -21,7 +21,7 @@ at the pin); change them there, not here.
 
 ## This repo tests itself against busbar
 
-CI runs the fleet's one harness (busbar-release `ci/plugin/run.sh`) at the busbar commit in
+CI runs the fleet's one harness, busbar's reusable `plugin-ci.yml`, at the busbar commit in
 `.busbar-ref`: fmt, clippy -D warnings, the whole test suite, `cargo deny`, the dependency wall
 (busbar-contract plus third-party only), the socket/TLS ban (no plugin opens its own socket, dials,
 binds or does TLS), the C-dependency allow-list, `Cargo.lock` parity with busbar's lock at the pin,
