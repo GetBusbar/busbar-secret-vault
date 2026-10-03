@@ -150,6 +150,7 @@ dependencies = [
  "busbar-contract",
  "busbar-plugin-loader",
  "busbar-secret-vault",
+ "busbar-secret-vault-plugin",
  "serde_json",
 ]
 
