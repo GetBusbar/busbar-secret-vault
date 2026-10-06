@@ -116,3 +116,13 @@ fn the_statement_names_the_plugin_and_its_token_reference() {
     assert_eq!(STATEMENT.name.len, crate::NAME.len());
     assert_eq!(STATEMENT.max_inflight, 64);
 }
+
+/// The framed request names the read's path and query, never the authority (that is the need's).
+#[test]
+fn the_framed_request_names_the_path() {
+    assert_eq!(
+        super::path_of("https://vault.internal:8200/v1/kv/data/x?version=2"),
+        "/v1/kv/data/x?version=2"
+    );
+    assert_eq!(super::path_of("not a url"), "/");
+}

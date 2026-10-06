@@ -25,7 +25,7 @@ jobs:
     secrets: inherit
   release:
     needs: ci
-    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@8fc3b1b2a6d123575a77ce505e501b595fb24cef
+    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@af1919aa7ba2404b0463c241e1c4324f36c61e9e
     with:
       plugin_crate: busbar-secret-vault-plugin
       manifest_name: busbar-secret-vault
@@ -41,7 +41,7 @@ jobs:
   consumer-verify:
     needs: release
     if: ${{ !cancelled() }}
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@8fc3b1b2a6d123575a77ce505e501b595fb24cef
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@af1919aa7ba2404b0463c241e1c4324f36c61e9e
     with:
       version: ${{ github.ref_name }}
       asset_prefix: busbar-secret-vault

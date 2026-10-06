@@ -1,0 +1,14 @@
+{
+  "settings": { "addr": "https://localhost:58940", "token": "s.conformance-token", "timeout_secs": 5 },
+  "dialing_steps": ["resolve known", "resolve known again", "resolve unknown", "resolve after refresh"],
+  "secret": {
+    "bad_settings": [
+      "",
+      { "token": "s.x" },
+      { "addr": "https://localhost:58940", "token": "s.x", "bogus": 1 }
+    ],
+    "known": { "resolve": { "path": "kv/data/conf#api_key" }, "material": "sk-conformance" },
+    "unknown": { "path": "kv/data/absent#api_key" },
+    "malformed": { "path": "kv/data/conf" }
+  }
+}
