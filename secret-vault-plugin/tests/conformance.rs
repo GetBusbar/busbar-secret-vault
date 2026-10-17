@@ -61,7 +61,7 @@ fn vault(seen: &[u8]) -> Option<Vec<u8>> {
 
 /// The host the suite binds the plugin over, with the far end its settings name already listening.
 fn host(
-    wake: std::sync::Arc<dyn Fn(u64) + Send + Sync>,
+    wake: busbar_contract::conn::ConnWake,
     anchors: Option<&str>,
 ) -> std::sync::Arc<dyn busbar_contract::conn::DeclaredConns> {
     conformance_host::far_end(vault);
