@@ -3,7 +3,7 @@
 
 //! The **HashiCorp Vault** backend for busbar's `kind: secret` plugin family, on the secret kind's
 //! memory ABI (`busbar_contract::abi::secret`). This crate is the LOGIC and its door
-//! ([`door::door`]); the dropped-in `cdylib` is the sibling `busbar-secret-vault-plugin` crate,
+//! ([`door`]); the dropped-in `cdylib` is the sibling `busbar-secret-vault-plugin` crate,
 //! which exports the same door as `busbar_plugin_door`.
 //!
 //! ## What it does
@@ -57,18 +57,21 @@ use busbar_contract::abi::secret::{
 use busbar_contract::secret::{SecretErrorKind, SecretModuleError, SecretResult};
 use serde::Deserialize;
 
-pub mod door;
+mod door;
+
+/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+pub use door::door;
 
 /// The plugin's name (the manifest name) and the `module` alias a reference spells.
-pub const NAME: &str = "busbar-secret-vault";
+const NAME: &str = "busbar-secret-vault";
 
 /// Upper bound on a Vault KV v2 response body, as 1.5.5. A KV v2 entry is typically a handful of
 /// short fields; this is generous headroom while still bounding the allocation against a hostile
 /// or misbehaving Vault endpoint.
-pub const MAX_VAULT_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_VAULT_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// The settings key whose value is the token's secret reference (the Statement's `secret_refs`).
-pub const TOKEN_KEY: &str = "token";
+const TOKEN_KEY: &str = "token";
 
 /// Default HTTP timeout (connect + total), in seconds, as 1.5.5.
 fn default_timeout_secs() -> u64 {
@@ -79,7 +82,7 @@ fn default_timeout_secs() -> u64 {
 /// secret reference as written (the material arrives through `open`'s secrets, never here).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct VaultConfig {
+struct VaultConfig {
     /// The Vault server address, e.g. `https://vault.internal:8200`. A trailing slash is tolerated.
     pub addr: String,
     /// The token's secret reference, as the operator wrote it (required, as 1.5.5).
@@ -99,7 +102,7 @@ pub struct VaultConfig {
 ///
 /// # Errors
 /// The operator-facing refusal text.
-pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
+fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
     let text = std::str::from_utf8(settings)
         .map_err(|e| format!("invalid hashicorp-vault plugin config: {e}"))?;
     if text.trim().is_empty() {
@@ -116,7 +119,7 @@ pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
 ///
 /// # Errors
 /// [`SecretErrorKind::Invalid`], naming what is missing.
-pub fn parse_reference(
+fn parse_reference(
     settings: &serde_json::Map<String, serde_json::Value>,
 ) -> SecretResult<(String, String)> {
     let path = settings
@@ -149,7 +152,7 @@ pub fn parse_reference(
 ///
 /// # Errors
 /// [`SecretErrorKind::Invalid`]: the bytes are not a JSON object.
-pub fn settings_of(bytes: &[u8]) -> SecretResult<serde_json::Map<String, serde_json::Value>> {
+fn settings_of(bytes: &[u8]) -> SecretResult<serde_json::Map<String, serde_json::Value>> {
     if bytes.is_empty() {
         return Ok(serde_json::Map::new());
     }
@@ -160,7 +163,7 @@ pub fn settings_of(bytes: &[u8]) -> SecretResult<serde_json::Map<String, serde_j
 
 /// The `abi::secret::ERROR_KIND_*` code of a [`SecretErrorKind`].
 #[must_use]
-pub const fn error_kind(kind: SecretErrorKind) -> u32 {
+const fn error_kind(kind: SecretErrorKind) -> u32 {
     match kind {
         SecretErrorKind::NotFound => ERROR_KIND_NOT_FOUND,
         SecretErrorKind::Unavailable => ERROR_KIND_UNAVAILABLE,
@@ -172,7 +175,7 @@ pub const fn error_kind(kind: SecretErrorKind) -> u32 {
 
 /// ONE framed http request, as the plugin hands it to the host's exchange. The token rides as a
 /// head field; `Debug` never prints field values.
-pub struct Request {
+struct Request {
     /// The method (`GET`).
     pub method: &'static str,
     /// The full target URL, `{addr}/v1/{path}`. Carries no secret.
@@ -205,7 +208,7 @@ impl std::fmt::Debug for Request {
 
 /// ONE framed http response, as the exchange answers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Response {
+struct Response {
     /// The status code.
     pub status: u16,
     /// The body, at most the request's `body_cap` bytes.
@@ -216,7 +219,7 @@ pub struct Response {
 
 /// What an exchange answered for one call.
 #[derive(Debug)]
-pub enum Exchanged {
+enum Exchanged {
     /// Not ready: the host fires the op's wake when it is, and the op is re-invoked.
     Pending,
     /// The response, or the transport's failure text (never secret material).
@@ -226,14 +229,14 @@ pub enum Exchanged {
 /// The host's framed one-shot http exchange, as the plugin sees it. `ticket` names the op: a
 /// re-invoked op asking again on the same ticket receives the stored result, never a second
 /// request.
-pub trait Exchange {
+trait Exchange {
     /// Run (or collect) the exchange for `ticket`.
     fn exchange(&self, ticket: (u32, u32), request: &Request) -> Exchanged;
 }
 
 /// The Vault client: the resolved `addr`, the token material and the transport settings, built
 /// once at `open` (and at `refresh`) and reused for every `resolve`.
-pub struct VaultClient {
+struct VaultClient {
     addr: String,
     token: Vec<u8>,
     timeout_secs: u64,
@@ -327,7 +330,7 @@ fn status_text(status: u16) -> String {
 ///
 /// # Errors
 /// The classified refusal; its text never carries the token or the material.
-pub fn judge(
+fn judge(
     vault_path: &str,
     field: &str,
     url: &str,

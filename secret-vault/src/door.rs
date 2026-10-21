@@ -72,11 +72,22 @@ const fn need(trust_from: AbiStr) -> Need {
 /// over the first.
 const NEEDS: &[Need] = &[need(NONE), need(abi_str(TRUST_FROM))];
 
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json"),
+    )]
+);
+
 /// This plugin's Statement: its name, version, the most resolves one instance holds in flight, the
-/// token as its one secret reference, and its needs.
-pub const STATEMENT: Statement = statement(crate::NAME, env!("CARGO_PKG_VERSION"), 64)
-    .with_secret_refs(SECRET_REFS)
-    .with_needs(NEEDS);
+/// token as its one secret reference, its needs, and its `declares` document.
+const STATEMENT: Statement = Statement {
+    extensions: EXTENSIONS,
+    ..statement(crate::NAME, env!("CARGO_PKG_VERSION"), 64)
+        .with_secret_refs(SECRET_REFS)
+        .with_needs(NEEDS)
+};
 
 /// The token material `secrets` lends, required non-empty.
 fn token<'a>(secrets: &[&'a [u8]]) -> Result<&'a [u8], String> {
