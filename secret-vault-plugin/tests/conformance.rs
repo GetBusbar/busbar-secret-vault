@@ -69,7 +69,7 @@ fn host(
 }
 
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_secret_vault::door::door,
+    door: busbar_secret_vault::door::MACRO_DOOR,
     cdylib: "busbar_secret_vault_plugin",
     inputs: include_str!("conformance.json"),
     host: host,
