@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   consumer:
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@7263f4e61b7af7fdadb9079394d139547e61d1c0
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@33c11e4cf4431a4543e7cb361b4feebfc6aad1c1
     with:
       version: ${{ inputs.version || '' }}
       asset_prefix: busbar-secret-vault
