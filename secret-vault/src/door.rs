@@ -21,7 +21,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, BLOB_OCTETS};
+use busbar_contract::abi::mechanism::call::{AbiStr, Outcome, BLOB_OCTETS};
 use busbar_contract::abi::mechanism::door::Statement;
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::Host;
@@ -37,10 +37,7 @@ use crate::{error_kind, parse_config, settings_of, Exchange, Exchanged, Request,
 /// The settings keys whose values are secret references, in `OpenIn::secrets` order.
 const SECRET_REFS: &[AbiStr] = &[abi_str(crate::TOKEN_KEY)];
 
-const NONE: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
+const NONE: AbiStr = AbiStr::ABSENT;
 
 /// The config path the target comes from: the `addr` setting (the host resolves it at `open` and
 /// `refresh` and pins every exchange of the need to it).
@@ -58,23 +55,16 @@ pub const NEED_OPERATOR_CA: u32 = 1;
 /// operator-infrastructure egress class (a Vault is the operator's own service: its address may be
 /// private, and `http://` is the operator's choice), trusting `trust_from`'s CA when it names one.
 const fn need(trust_from: AbiStr) -> Need {
-    Need {
-        direction: DIRECTION_OUTBOUND,
-        egress_class: EGRESS_OPERATOR_INFRASTRUCTURE,
-        transport: abi_str("http"),
-        auth: NONE,
-        target_from: abi_str(TARGET_FROM),
-        trust_from,
-        details: Blob::ABSENT,
-        keep_response_headers: std::ptr::null(),
-        keep_response_headers_len: 0,
-        timeout_ms: 0,
-        // The response head is not read: the named (empty) list.
-        keep_mode: KEEP_NAMED,
-        _reserved: 0,
-        deny_response_headers: std::ptr::null(),
-        deny_response_headers_len: 0,
-    }
+    let mut n = Need::EMPTY;
+    n.direction = DIRECTION_OUTBOUND;
+    n.egress_class = EGRESS_OPERATOR_INFRASTRUCTURE;
+    n.transport = abi_str("http");
+    n.target_from = abi_str(TARGET_FROM);
+    n.trust_from = trust_from;
+    n.timeout_ms = 0;
+    // The response head is not read: the named (empty) list.
+    n.keep_mode = KEEP_NAMED;
+    n
 }
 
 /// The two needs, by index: [`NEED_PUBLIC`] and [`NEED_OPERATOR_CA`]. A configuration with no
@@ -84,13 +74,9 @@ const NEEDS: &[Need] = &[need(NONE), need(abi_str(TRUST_FROM))];
 
 /// This plugin's Statement: its name, version, the most resolves one instance holds in flight, the
 /// token as its one secret reference, and its needs.
-pub const STATEMENT: Statement = Statement {
-    secret_refs: SECRET_REFS.as_ptr(),
-    secret_refs_len: SECRET_REFS.len(),
-    needs: NEEDS.as_ptr(),
-    needs_len: NEEDS.len(),
-    ..statement(crate::NAME, env!("CARGO_PKG_VERSION"), 64)
-};
+pub const STATEMENT: Statement = statement(crate::NAME, env!("CARGO_PKG_VERSION"), 64)
+    .with_secret_refs(SECRET_REFS)
+    .with_needs(NEEDS);
 
 /// The token material `secrets` lends, required non-empty.
 fn token<'a>(secrets: &[&'a [u8]]) -> Result<&'a [u8], String> {
@@ -287,7 +273,7 @@ impl SafeSlot for Resolve {
         let Some(held) = instance.get() else {
             return Outcome::Refused;
         };
-        let settings = input.field(|i| &i.settings).bytes();
+        let settings = input.settings().bytes();
         let vault = held.life();
         let answered = if vault.over_the_host() {
             let exchange = HostExchange::new(&instance, held.host());
@@ -320,7 +306,7 @@ mod table {
 }
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
-pub use table::door;
+pub use table::{door, MACRO_DOOR};
 
 #[cfg(test)]
 #[path = "tests/door_tests.rs"]
