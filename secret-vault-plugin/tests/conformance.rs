@@ -68,10 +68,29 @@ fn host(
     conformance_host::host(wake, anchors)
 }
 
+use busbar_plugin_loader::dispatch::{LinkedRow, LoadedDoor};
+
+/// This crate's own door, as the loader names a compiled-in one.
+#[allow(unused_unsafe)]
+fn loaded() -> LoadedDoor {
+    // SAFETY: `door` is this crate's own `plugin_door!` entry.
+    unsafe { LoadedDoor::from_raw(busbar_secret_vault::door) }
+}
+
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_secret_vault::door::door,
+    loaded: loaded(),
     cdylib: "busbar_secret_vault_plugin",
     inputs: include_str!("conformance.json"),
     host: host,
     tls: conformance_host::anchors(),
+}
+
+#[test]
+fn the_statement_carries_the_declares_document() {
+    let row = LinkedRow::of_loaded(loaded()).expect("the door states itself");
+    let read = busbar_contract::abi::mechanism::rendering::read(&row.statement).unwrap();
+    assert_eq!(
+        busbar_contract::abi::mechanism::extensions::declares(&read.extensions.bytes),
+        Some(&include_bytes!("../../secret-vault/declares.json")[..]),
+    );
 }

@@ -216,7 +216,7 @@ impl Exchange for ReqwestExchange {
                 let status = resp.status().as_u16();
                 let body = resp.bytes().map(|b| b.to_vec()).unwrap_or_default();
                 let body_len = body.len();
-                let body = body[..body_len.min(r.body_cap)].to_vec();
+                let body = Zeroizing::new(body[..body_len.min(r.body_cap)].to_vec());
                 Ok(Response {
                     status,
                     body,
@@ -238,7 +238,7 @@ impl Canned {
     fn status(status: u16, body: &str) -> Self {
         Self::of(Ok(Response {
             status,
-            body: body.as_bytes().to_vec(),
+            body: Zeroizing::new(body.as_bytes().to_vec()),
             body_len: body.len(),
         }))
     }
@@ -283,6 +283,33 @@ fn kv2(data: serde_json::Value) -> String {
     json!({ "data": { "data": data, "metadata": { "version": 1 } } }).to_string()
 }
 
+/// The token, each request copy of it and the response body are the types that wipe on drop.
+///
+/// A plain `Vec<u8>` and `fill(0)` in a `Drop` is a dead store the compiler may remove; a buffer
+/// that is about to be freed is never read again. `ZeroizeOnDrop` is implemented by `Zeroizing`
+/// (whose drop uses volatile writes) and not by `Vec<u8>`, so a field reverted to a bare `Vec<u8>`
+/// stops this test compiling. (The crate forbids `unsafe`, so the freed buffer is not read back.)
+#[test]
+fn the_token_its_request_copies_and_the_body_are_wiped_on_drop() {
+    fn wipes_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+    let c = VaultClient::new(&cfg(ADDR), TOKEN);
+    wipes_on_drop(&c.token);
+
+    let r = c.request("/kv/data/openai");
+    assert_eq!(r.fields.len(), 1);
+    for (_, copy) in &r.fields {
+        wipes_on_drop(copy);
+    }
+
+    let resp = Response {
+        status: 200,
+        body: Zeroizing::new(b"material".to_vec()),
+        body_len: 8,
+    };
+    wipes_on_drop(&resp.body);
+}
+
 #[test]
 fn the_request_is_1_5_5s_get_with_the_token_header() {
     let c = VaultClient::new(&cfg(ADDR), TOKEN);
@@ -292,7 +319,10 @@ fn the_request_is_1_5_5s_get_with_the_token_header() {
         r.url, URL,
         "trailing slash trimmed once, leading slash of the path trimmed"
     );
-    assert_eq!(r.fields, vec![("X-Vault-Token", TOKEN.to_vec())]);
+    assert_eq!(
+        r.fields,
+        vec![("X-Vault-Token", Zeroizing::new(TOKEN.to_vec()))]
+    );
     assert_eq!(r.timeout_ms, 10_000);
     assert_eq!(r.body_cap, MAX_VAULT_RESPONSE_BYTES + 1);
     assert!(r.trust_pem.is_none());
@@ -422,7 +452,7 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
     let cap = MAX_VAULT_RESPONSE_BYTES;
     let over = Canned::of(Ok(Response {
         status: 200,
-        body: vec![b' '; cap + 1],
+        body: Zeroizing::new(vec![b' '; cap + 1]),
         body_len: cap + 1,
     }));
     let e = run(&over, json!({ "path": "kv/data/openai#k" })).unwrap_err();
@@ -434,7 +464,7 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
     // A host that fills only the cap but reports the full length is judged by the length.
     let reported = Canned::of(Ok(Response {
         status: 200,
-        body: vec![b' '; 10],
+        body: Zeroizing::new(vec![b' '; 10]),
         body_len: cap + 7,
     }));
     assert_eq!(
@@ -449,7 +479,7 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
     let at = Canned::of(Ok(Response {
         status: 200,
         body_len: at.len(),
-        body: at,
+        body: Zeroizing::new(at),
     }));
     assert_eq!(
         run(&at, json!({ "path": "kv/data/openai#k" })).unwrap(),
@@ -458,7 +488,7 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
     // 1.5.5 classifies 404/403/5xx before it reads the body: an oversize 404 is still a 404.
     let big404 = Canned::of(Ok(Response {
         status: 404,
-        body: vec![],
+        body: Zeroizing::new(vec![]),
         body_len: cap * 2,
     }));
     assert_eq!(
@@ -484,7 +514,7 @@ impl Exchange for PendsOnce {
         } else {
             Exchanged::Done(Ok(Response {
                 status: 200,
-                body: kv2(json!({ "k": "late" })).into_bytes(),
+                body: Zeroizing::new(kv2(json!({ "k": "late" })).into_bytes()),
                 body_len: kv2(json!({ "k": "late" })).len(),
             }))
         }
@@ -579,4 +609,29 @@ fn settings_of_reads_an_object_and_refuses_anything_else() {
         settings_of(b"[1]").unwrap_err().kind,
         SecretErrorKind::Invalid
     );
+}
+
+#[test]
+fn the_wipe_guard_empties_every_string_in_nested_objects_and_arrays() {
+    let mut kept = json!({
+        "data": {
+            "data": { "token": "s3cret", "other": "sibling", "n": 7, "ok": true, "nil": null },
+            "list": ["a", ["deep", { "k": "v" }], 3],
+        },
+        "auth": { "client_token": "tok" },
+    });
+    {
+        let _guard = WipeOnDrop(&mut kept);
+    }
+    assert_eq!(kept["data"]["data"]["token"], "");
+    assert_eq!(kept["data"]["data"]["other"], "");
+    assert_eq!(kept["data"]["list"][0], "");
+    assert_eq!(kept["data"]["list"][1][0], "");
+    assert_eq!(kept["data"]["list"][1][1]["k"], "");
+    assert_eq!(kept["auth"]["client_token"], "");
+    // Non-strings are untouched.
+    assert_eq!(kept["data"]["data"]["n"], 7);
+    assert_eq!(kept["data"]["data"]["ok"], true);
+    assert!(kept["data"]["data"]["nil"].is_null());
+    assert_eq!(kept["data"]["list"][2], 3);
 }

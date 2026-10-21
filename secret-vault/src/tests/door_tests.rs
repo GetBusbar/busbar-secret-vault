@@ -34,7 +34,7 @@ impl Exchange for Scripted {
         }
         Exchanged::Done(Ok(crate::Response {
             status: self.status,
-            body: self.body.clone().into_bytes(),
+            body: zeroize::Zeroizing::new(self.body.clone().into_bytes()),
             body_len: self.body.len(),
         }))
     }
@@ -112,8 +112,8 @@ fn open_and_refresh_need_the_token_material() {
 
 #[test]
 fn the_statement_names_the_plugin_and_its_token_reference() {
-    assert_eq!(STATEMENT.secret_refs_len, 1);
-    assert_eq!(STATEMENT.name.len, crate::NAME.len());
+    assert_eq!(STATEMENT.secret_refs_len(), 1);
+    assert_eq!(STATEMENT.name.len(), crate::NAME.len());
     assert_eq!(STATEMENT.max_inflight, 64);
 }
 

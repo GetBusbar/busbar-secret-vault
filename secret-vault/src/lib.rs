@@ -3,7 +3,7 @@
 
 //! The **HashiCorp Vault** backend for busbar's `kind: secret` plugin family, on the secret kind's
 //! memory ABI (`busbar_contract::abi::secret`). This crate is the LOGIC and its door
-//! ([`door::door`]); the dropped-in `cdylib` is the sibling `busbar-secret-vault-plugin` crate,
+//! ([`door`]); the dropped-in `cdylib` is the sibling `busbar-secret-vault-plugin` crate,
 //! which exports the same door as `busbar_plugin_door`.
 //!
 //! ## What it does
@@ -56,19 +56,23 @@ use busbar_contract::abi::secret::{
 };
 use busbar_contract::secret::{SecretErrorKind, SecretModuleError, SecretResult};
 use serde::Deserialize;
+use zeroize::{Zeroize, Zeroizing};
 
-pub mod door;
+mod door;
+
+/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+pub use door::door;
 
 /// The plugin's name (the manifest name) and the `module` alias a reference spells.
-pub const NAME: &str = "busbar-secret-vault";
+const NAME: &str = "busbar-secret-vault";
 
 /// Upper bound on a Vault KV v2 response body, as 1.5.5. A KV v2 entry is typically a handful of
 /// short fields; this is generous headroom while still bounding the allocation against a hostile
 /// or misbehaving Vault endpoint.
-pub const MAX_VAULT_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_VAULT_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// The settings key whose value is the token's secret reference (the Statement's `secret_refs`).
-pub const TOKEN_KEY: &str = "token";
+const TOKEN_KEY: &str = "token";
 
 /// Default HTTP timeout (connect + total), in seconds, as 1.5.5.
 fn default_timeout_secs() -> u64 {
@@ -79,10 +83,13 @@ fn default_timeout_secs() -> u64 {
 /// secret reference as written (the material arrives through `open`'s secrets, never here).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct VaultConfig {
+struct VaultConfig {
     /// The Vault server address, e.g. `https://vault.internal:8200`. A trailing slash is tolerated.
     pub addr: String,
-    /// The token's secret reference, as the operator wrote it (required, as 1.5.5).
+    /// The token's secret reference, as the operator wrote it (required, as 1.5.5). Parsed so a
+    /// config without it is refused and `deny_unknown_fields` accepts it; the kernel resolves it
+    /// and hands the material through `open`'s secrets, so nothing in this crate reads the field.
+    #[allow(dead_code)]
     pub token: serde_json::Value,
     /// An ADDITIONAL trusted root CA certificate (PEM), layered on top of the public root store.
     /// Never disables certificate validation, only widens the trusted-root set. Carried to the
@@ -99,7 +106,7 @@ pub struct VaultConfig {
 ///
 /// # Errors
 /// The operator-facing refusal text.
-pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
+fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
     let text = std::str::from_utf8(settings)
         .map_err(|e| format!("invalid hashicorp-vault plugin config: {e}"))?;
     if text.trim().is_empty() {
@@ -116,7 +123,7 @@ pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
 ///
 /// # Errors
 /// [`SecretErrorKind::Invalid`], naming what is missing.
-pub fn parse_reference(
+fn parse_reference(
     settings: &serde_json::Map<String, serde_json::Value>,
 ) -> SecretResult<(String, String)> {
     let path = settings
@@ -149,7 +156,7 @@ pub fn parse_reference(
 ///
 /// # Errors
 /// [`SecretErrorKind::Invalid`]: the bytes are not a JSON object.
-pub fn settings_of(bytes: &[u8]) -> SecretResult<serde_json::Map<String, serde_json::Value>> {
+fn settings_of(bytes: &[u8]) -> SecretResult<serde_json::Map<String, serde_json::Value>> {
     if bytes.is_empty() {
         return Ok(serde_json::Map::new());
     }
@@ -160,7 +167,7 @@ pub fn settings_of(bytes: &[u8]) -> SecretResult<serde_json::Map<String, serde_j
 
 /// The `abi::secret::ERROR_KIND_*` code of a [`SecretErrorKind`].
 #[must_use]
-pub const fn error_kind(kind: SecretErrorKind) -> u32 {
+const fn error_kind(kind: SecretErrorKind) -> u32 {
     match kind {
         SecretErrorKind::NotFound => ERROR_KIND_NOT_FOUND,
         SecretErrorKind::Unavailable => ERROR_KIND_UNAVAILABLE,
@@ -172,13 +179,13 @@ pub const fn error_kind(kind: SecretErrorKind) -> u32 {
 
 /// ONE framed http request, as the plugin hands it to the host's exchange. The token rides as a
 /// head field; `Debug` never prints field values.
-pub struct Request {
+struct Request {
     /// The method (`GET`).
     pub method: &'static str,
     /// The full target URL, `{addr}/v1/{path}`. Carries no secret.
     pub url: String,
-    /// The head fields: `X-Vault-Token`.
-    pub fields: Vec<(&'static str, Vec<u8>)>,
+    /// The head fields: `X-Vault-Token`. Each value is a token copy, wiped when the request drops.
+    pub fields: Vec<(&'static str, Zeroizing<Vec<u8>>)>,
     /// The connect + total timeout, in milliseconds.
     pub timeout_ms: u64,
     /// The extra trusted root (PEM) the need's `trust_from` names; `None` = the public roots.
@@ -205,18 +212,19 @@ impl std::fmt::Debug for Request {
 
 /// ONE framed http response, as the exchange answers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Response {
+struct Response {
     /// The status code.
     pub status: u16,
-    /// The body, at most the request's `body_cap` bytes.
-    pub body: Vec<u8>,
+    /// The body, at most the request's `body_cap` bytes. A Vault read's body carries the secret
+    /// material, so it is wiped when the response drops.
+    pub body: Zeroizing<Vec<u8>>,
     /// The body's full length (the short-buffer rule's `needed`); over `body_cap` = too big.
     pub body_len: usize,
 }
 
 /// What an exchange answered for one call.
 #[derive(Debug)]
-pub enum Exchanged {
+enum Exchanged {
     /// Not ready: the host fires the op's wake when it is, and the op is re-invoked.
     Pending,
     /// The response, or the transport's failure text (never secret material).
@@ -226,16 +234,16 @@ pub enum Exchanged {
 /// The host's framed one-shot http exchange, as the plugin sees it. `ticket` names the op: a
 /// re-invoked op asking again on the same ticket receives the stored result, never a second
 /// request.
-pub trait Exchange {
+trait Exchange {
     /// Run (or collect) the exchange for `ticket`.
     fn exchange(&self, ticket: (u32, u32), request: &Request) -> Exchanged;
 }
 
 /// The Vault client: the resolved `addr`, the token material and the transport settings, built
 /// once at `open` (and at `refresh`) and reused for every `resolve`.
-pub struct VaultClient {
+struct VaultClient {
     addr: String,
-    token: Vec<u8>,
+    token: Zeroizing<Vec<u8>>,
     timeout_secs: u64,
     ca_cert_pem: Option<String>,
 }
@@ -250,19 +258,13 @@ impl std::fmt::Debug for VaultClient {
     }
 }
 
-impl Drop for VaultClient {
-    fn drop(&mut self) {
-        self.token.fill(0);
-    }
-}
-
 impl VaultClient {
     /// The client for `cfg`, with the token material the kernel resolved.
     #[must_use]
     pub fn new(cfg: &VaultConfig, token: &[u8]) -> Self {
         Self {
             addr: cfg.addr.trim_end_matches('/').to_string(),
-            token: token.to_vec(),
+            token: Zeroizing::new(token.to_vec()),
             timeout_secs: cfg.timeout_secs,
             ca_cert_pem: cfg.ca_cert_pem.clone(),
         }
@@ -280,7 +282,7 @@ impl VaultClient {
         Request {
             method: "GET",
             url: self.url(vault_path),
-            fields: vec![("X-Vault-Token", self.token.clone())],
+            fields: vec![("X-Vault-Token", Zeroizing::new(self.token.to_vec()))],
             timeout_ms: self.timeout_secs.saturating_mul(1000),
             trust_pem: self.ca_cert_pem.clone(),
             // One byte past the cap tells "at the cap" from "over it" even if the host reports no
@@ -327,7 +329,7 @@ fn status_text(status: u16) -> String {
 ///
 /// # Errors
 /// The classified refusal; its text never carries the token or the material.
-pub fn judge(
+fn judge(
     vault_path: &str,
     field: &str,
     url: &str,
@@ -373,15 +375,19 @@ pub fn judge(
         )));
     }
 
-    let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
+    // The parsed document holds the secret and every sibling field in plain `String`s: the guard
+    // wipes whatever is still inside it on every exit, after the error texts below are built.
+    let mut parsed: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
         SecretModuleError::internal(format!(
             "Vault response for path {vault_path:?} is not valid JSON: {e}"
         ))
     })?;
-    let data = v
-        .get("data")
-        .and_then(|d| d.get("data"))
-        .and_then(|d| d.as_object())
+    let guard = WipeOnDrop(&mut parsed);
+    let data = guard
+        .0
+        .get_mut("data")
+        .and_then(|d| d.get_mut("data"))
+        .and_then(|d| d.as_object_mut())
         .ok_or_else(|| {
             SecretModuleError::invalid(format!(
                 "Vault response for path {vault_path:?} has no `data.data` object (not a KV v2 \
@@ -389,7 +395,8 @@ pub fn judge(
             ))
         })?;
 
-    let value = data.get(field).ok_or_else(|| {
+    // Moved out of the document, never cloned: the returned bytes are the only copy of the value.
+    let value = data.remove(field).ok_or_else(|| {
         let available: Vec<&str> = data.keys().map(String::as_str).collect();
         SecretModuleError::not_found(format!(
             "Vault secret at path {vault_path:?} has no field {field:?}; available fields: \
@@ -398,8 +405,32 @@ pub fn judge(
     })?;
 
     match value {
-        serde_json::Value::String(s) => Ok(s.clone().into_bytes()),
-        other => Ok(other.to_string().into_bytes()),
+        serde_json::Value::String(s) => Ok(s.into_bytes()),
+        mut other => {
+            let rendered = other.to_string().into_bytes();
+            wipe_value(&mut other);
+            Ok(rendered)
+        }
+    }
+}
+
+/// Borrows a parsed Vault response and wipes every string in it when dropped.
+struct WipeOnDrop<'a>(&'a mut serde_json::Value);
+
+impl Drop for WipeOnDrop<'_> {
+    fn drop(&mut self) {
+        wipe_value(self.0);
+    }
+}
+
+/// Zeroize every `String` in `v`, walking objects and arrays. (Object keys are field names, not
+/// values.)
+fn wipe_value(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::String(s) => s.zeroize(),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(wipe_value),
+        serde_json::Value::Object(map) => map.values_mut().for_each(wipe_value),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
 }
 
