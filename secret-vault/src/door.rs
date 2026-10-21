@@ -76,17 +76,18 @@ busbar_contract::statement_extensions!(
     /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
     EXTENSIONS: [(
         busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
-        include_bytes!("../declares.json"),
+        include_bytes!("../declares.json")
     )]
 );
 
 /// This plugin's Statement: its name, version, the most resolves one instance holds in flight, the
 /// token as its one secret reference, its needs, and its `declares` document.
-const STATEMENT: Statement = Statement {
-    extensions: EXTENSIONS,
-    ..statement(crate::NAME, env!("CARGO_PKG_VERSION"), 64)
+const STATEMENT: Statement = {
+    let mut s = statement(crate::NAME, env!("CARGO_PKG_VERSION"), 64)
         .with_secret_refs(SECRET_REFS)
-        .with_needs(NEEDS)
+        .with_needs(NEEDS);
+    s.extensions = EXTENSIONS;
+    s
 };
 
 /// The token material `secrets` lends, required non-empty.
@@ -193,6 +194,7 @@ impl std::fmt::Debug for Vault {
 
 impl Vault {
     /// An instance over `client`, exchanging through `exchange` (a test's stand-in for the host).
+    #[cfg(test)]
     pub fn new(client: VaultClient, exchange: Box<dyn Exchange + Send + Sync>) -> Self {
         Self {
             client: RwLock::new(Arc::new(client)),
