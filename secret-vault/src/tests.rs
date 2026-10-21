@@ -610,3 +610,28 @@ fn settings_of_reads_an_object_and_refuses_anything_else() {
         SecretErrorKind::Invalid
     );
 }
+
+#[test]
+fn the_wipe_guard_empties_every_string_in_nested_objects_and_arrays() {
+    let mut kept = json!({
+        "data": {
+            "data": { "token": "s3cret", "other": "sibling", "n": 7, "ok": true, "nil": null },
+            "list": ["a", ["deep", { "k": "v" }], 3],
+        },
+        "auth": { "client_token": "tok" },
+    });
+    {
+        let _guard = WipeOnDrop(&mut kept);
+    }
+    assert_eq!(kept["data"]["data"]["token"], "");
+    assert_eq!(kept["data"]["data"]["other"], "");
+    assert_eq!(kept["data"]["list"][0], "");
+    assert_eq!(kept["data"]["list"][1][0], "");
+    assert_eq!(kept["data"]["list"][1][1]["k"], "");
+    assert_eq!(kept["auth"]["client_token"], "");
+    // Non-strings are untouched.
+    assert_eq!(kept["data"]["data"]["n"], 7);
+    assert_eq!(kept["data"]["data"]["ok"], true);
+    assert!(kept["data"]["data"]["nil"].is_null());
+    assert_eq!(kept["data"]["list"][2], 3);
+}

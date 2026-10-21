@@ -56,7 +56,7 @@ use busbar_contract::abi::secret::{
 };
 use busbar_contract::secret::{SecretErrorKind, SecretModuleError, SecretResult};
 use serde::Deserialize;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 mod door;
 
@@ -372,15 +372,19 @@ fn judge(
         )));
     }
 
-    let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
+    // The parsed document holds the secret and every sibling field in plain `String`s: the guard
+    // wipes whatever is still inside it on every exit, after the error texts below are built.
+    let mut parsed: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
         SecretModuleError::internal(format!(
             "Vault response for path {vault_path:?} is not valid JSON: {e}"
         ))
     })?;
-    let data = v
-        .get("data")
-        .and_then(|d| d.get("data"))
-        .and_then(|d| d.as_object())
+    let mut guard = WipeOnDrop(&mut parsed);
+    let data = guard
+        .0
+        .get_mut("data")
+        .and_then(|d| d.get_mut("data"))
+        .and_then(|d| d.as_object_mut())
         .ok_or_else(|| {
             SecretModuleError::invalid(format!(
                 "Vault response for path {vault_path:?} has no `data.data` object (not a KV v2 \
@@ -388,7 +392,8 @@ fn judge(
             ))
         })?;
 
-    let value = data.get(field).ok_or_else(|| {
+    // Moved out of the document, never cloned: the returned bytes are the only copy of the value.
+    let value = data.remove(field).ok_or_else(|| {
         let available: Vec<&str> = data.keys().map(String::as_str).collect();
         SecretModuleError::not_found(format!(
             "Vault secret at path {vault_path:?} has no field {field:?}; available fields: \
@@ -397,8 +402,32 @@ fn judge(
     })?;
 
     match value {
-        serde_json::Value::String(s) => Ok(s.clone().into_bytes()),
-        other => Ok(other.to_string().into_bytes()),
+        serde_json::Value::String(s) => Ok(s.into_bytes()),
+        mut other => {
+            let rendered = other.to_string().into_bytes();
+            wipe_value(&mut other);
+            Ok(rendered)
+        }
+    }
+}
+
+/// Borrows a parsed Vault response and wipes every string in it when dropped.
+struct WipeOnDrop<'a>(&'a mut serde_json::Value);
+
+impl Drop for WipeOnDrop<'_> {
+    fn drop(&mut self) {
+        wipe_value(self.0);
+    }
+}
+
+/// Zeroize every `String` in `v`, walking objects and arrays. (Object keys are field names, not
+/// values.)
+fn wipe_value(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::String(s) => s.zeroize(),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(wipe_value),
+        serde_json::Value::Object(map) => map.values_mut().for_each(wipe_value),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
 }
 
