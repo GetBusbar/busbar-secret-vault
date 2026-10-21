@@ -379,7 +379,7 @@ fn judge(
             "Vault response for path {vault_path:?} is not valid JSON: {e}"
         ))
     })?;
-    let mut guard = WipeOnDrop(&mut parsed);
+    let guard = WipeOnDrop(&mut parsed);
     let data = guard
         .0
         .get_mut("data")
