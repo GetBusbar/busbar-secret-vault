@@ -86,7 +86,10 @@ fn default_timeout_secs() -> u64 {
 struct VaultConfig {
     /// The Vault server address, e.g. `https://vault.internal:8200`. A trailing slash is tolerated.
     pub addr: String,
-    /// The token's secret reference, as the operator wrote it (required, as 1.5.5).
+    /// The token's secret reference, as the operator wrote it (required, as 1.5.5). Parsed so a
+    /// config without it is refused and `deny_unknown_fields` accepts it; the kernel resolves it
+    /// and hands the material through `open`'s secrets, so nothing in this crate reads the field.
+    #[allow(dead_code)]
     pub token: serde_json::Value,
     /// An ADDITIONAL trusted root CA certificate (PEM), layered on top of the public root store.
     /// Never disables certificate validation, only widens the trusted-root set. Carried to the
