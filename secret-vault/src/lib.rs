@@ -56,6 +56,7 @@ use busbar_contract::abi::secret::{
 };
 use busbar_contract::secret::{SecretErrorKind, SecretModuleError, SecretResult};
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 mod door;
 
@@ -180,8 +181,8 @@ struct Request {
     pub method: &'static str,
     /// The full target URL, `{addr}/v1/{path}`. Carries no secret.
     pub url: String,
-    /// The head fields: `X-Vault-Token`.
-    pub fields: Vec<(&'static str, Vec<u8>)>,
+    /// The head fields: `X-Vault-Token`. Each value is a token copy, wiped when the request drops.
+    pub fields: Vec<(&'static str, Zeroizing<Vec<u8>>)>,
     /// The connect + total timeout, in milliseconds.
     pub timeout_ms: u64,
     /// The extra trusted root (PEM) the need's `trust_from` names; `None` = the public roots.
@@ -211,8 +212,9 @@ impl std::fmt::Debug for Request {
 struct Response {
     /// The status code.
     pub status: u16,
-    /// The body, at most the request's `body_cap` bytes.
-    pub body: Vec<u8>,
+    /// The body, at most the request's `body_cap` bytes. A Vault read's body carries the secret
+    /// material, so it is wiped when the response drops.
+    pub body: Zeroizing<Vec<u8>>,
     /// The body's full length (the short-buffer rule's `needed`); over `body_cap` = too big.
     pub body_len: usize,
 }
@@ -238,7 +240,7 @@ trait Exchange {
 /// once at `open` (and at `refresh`) and reused for every `resolve`.
 struct VaultClient {
     addr: String,
-    token: Vec<u8>,
+    token: Zeroizing<Vec<u8>>,
     timeout_secs: u64,
     ca_cert_pem: Option<String>,
 }
@@ -253,19 +255,13 @@ impl std::fmt::Debug for VaultClient {
     }
 }
 
-impl Drop for VaultClient {
-    fn drop(&mut self) {
-        self.token.fill(0);
-    }
-}
-
 impl VaultClient {
     /// The client for `cfg`, with the token material the kernel resolved.
     #[must_use]
     pub fn new(cfg: &VaultConfig, token: &[u8]) -> Self {
         Self {
             addr: cfg.addr.trim_end_matches('/').to_string(),
-            token: token.to_vec(),
+            token: Zeroizing::new(token.to_vec()),
             timeout_secs: cfg.timeout_secs,
             ca_cert_pem: cfg.ca_cert_pem.clone(),
         }
@@ -283,7 +279,7 @@ impl VaultClient {
         Request {
             method: "GET",
             url: self.url(vault_path),
-            fields: vec![("X-Vault-Token", self.token.clone())],
+            fields: vec![("X-Vault-Token", Zeroizing::new(self.token.to_vec()))],
             timeout_ms: self.timeout_secs.saturating_mul(1000),
             trust_pem: self.ca_cert_pem.clone(),
             // One byte past the cap tells "at the cap" from "over it" even if the host reports no

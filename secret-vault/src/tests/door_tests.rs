@@ -34,7 +34,7 @@ impl Exchange for Scripted {
         }
         Exchanged::Done(Ok(crate::Response {
             status: self.status,
-            body: self.body.clone().into_bytes(),
+            body: zeroize::Zeroizing::new(self.body.clone().into_bytes()),
             body_len: self.body.len(),
         }))
     }

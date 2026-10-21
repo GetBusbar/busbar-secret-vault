@@ -31,6 +31,7 @@ use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::abi::secret::{cancel, ResolveIn, ResolveOut, ERROR_KIND_UNSET};
 use busbar_contract::secret::SecretResult;
+use zeroize::Zeroizing;
 
 use crate::{error_kind, parse_config, settings_of, Exchange, Exchanged, Request, VaultClient};
 
@@ -156,7 +157,7 @@ impl Exchange for HostExchange<'_> {
                 fields: request
                     .fields
                     .iter()
-                    .map(|(n, v)| (n.as_bytes().to_vec(), v.clone()))
+                    .map(|(n, v)| (n.as_bytes().to_vec(), v.to_vec()))
                     .collect(),
                 body: Vec::new(),
                 timeout_ms: request.timeout_ms,
@@ -167,7 +168,7 @@ impl Exchange for HostExchange<'_> {
             std::task::Poll::Ready(Err(e)) => Exchanged::Done(Err(e.to_string())),
             std::task::Poll::Ready(Ok(r)) => {
                 let body_len = r.body.len();
-                let mut body = r.body;
+                let mut body = Zeroizing::new(r.body);
                 body.truncate(request.body_cap);
                 Exchanged::Done(Ok(crate::Response {
                     status: r.status,
@@ -319,7 +320,7 @@ mod table {
 }
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
-pub use table::{door, MACRO_DOOR};
+pub use table::door;
 
 #[cfg(test)]
 #[path = "tests/door_tests.rs"]
