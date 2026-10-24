@@ -286,7 +286,7 @@ fn kv2(data: serde_json::Value) -> String {
 #[test]
 fn the_request_is_1_5_5s_get_with_the_token_header() {
     let c = VaultClient::new(&cfg(ADDR), TOKEN);
-    let r = c.request("/kv/data/openai");
+    let r = c.request("/kv/data/openai").expect("a valid URL");
     assert_eq!(r.method, "GET");
     assert_eq!(
         r.url, URL,
@@ -547,9 +547,76 @@ fn the_extra_root_and_timeout_ride_the_request() {
     let mut c = cfg(ADDR);
     c.ca_cert_pem = Some("-----BEGIN CERTIFICATE-----".into());
     c.timeout_secs = 3;
-    let r = VaultClient::new(&c, TOKEN).request("kv/data/x");
+    let r = VaultClient::new(&c, TOKEN)
+        .request("kv/data/x")
+        .expect("a valid URL");
     assert_eq!(r.trust_pem.as_deref(), Some("-----BEGIN CERTIFICATE-----"));
     assert_eq!(r.timeout_ms, 3000);
+}
+
+/// The framed target is the path and query, `addr`'s own prefix included, the path carried verbatim
+/// (bytes a URI cannot hold percent-encoded; `?` still starts the query).
+#[test]
+fn the_framed_target_is_the_path_and_query() {
+    let c = VaultClient::new(&cfg("https://vault.internal:8200"), TOKEN);
+    assert_eq!(
+        c.request("kv/data/x?version=2").unwrap().target,
+        "/v1/kv/data/x?version=2"
+    );
+    let c = VaultClient::new(&cfg("https://v:8200/prefix/"), TOKEN);
+    assert_eq!(
+        c.request("kv/data/x").unwrap().target,
+        "/prefix/v1/kv/data/x"
+    );
+}
+
+#[test]
+fn the_framed_target_percent_encodes_what_a_uri_cannot_hold() {
+    let c = VaultClient::new(&cfg("https://v:8200"), TOKEN);
+    let target = |p: &str| c.request(p).unwrap().target;
+    assert_eq!(target("kv/data/my app"), "/v1/kv/data/my%20app");
+    assert_eq!(target("kv/data/caf\u{e9}"), "/v1/kv/data/caf%C3%A9");
+    assert_eq!(target("a<b>`"), "/v1/a%3Cb%3E%60");
+    assert_eq!(target("kv/data/q?a=1&b=%20"), "/v1/kv/data/q?a=1&b=%20");
+    // A `#` that is part of the path (the `field` key form) is data, not a fragment.
+    let ex = Canned::status(200, &kv2(json!({ "k": "v" })));
+    let got = c
+        .resolve(
+            &settings(json!({ "path": "kv/data/a#b", "field": "k" })),
+            &ex,
+            T,
+        )
+        .unwrap();
+    assert_eq!(got.unwrap(), b"v");
+    assert_eq!(target("kv/data/a#b"), "/v1/kv/data/a%23b");
+    // The display URL stays the raw form.
+    assert_eq!(
+        c.request("kv/data/a#b").unwrap().url,
+        "https://v:8200/v1/kv/data/a#b"
+    );
+}
+
+#[test]
+fn an_addr_that_is_no_url_is_refused_before_any_exchange() {
+    let ex = Canned::status(200, &kv2(json!({ "k": "v" })));
+    let c = VaultClient::new(&cfg("vault.internal:8200"), TOKEN);
+    let e = c
+        .resolve(&settings(json!({ "path": "kv/data/x#k" })), &ex, T)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(e.kind, SecretErrorKind::Unavailable);
+    let url = "vault.internal:8200/v1/kv/data/x";
+    assert!(
+        e.message.starts_with(&format!(
+            "request to Vault ({url}) failed: the request URL is not a valid URL: "
+        )),
+        "{}",
+        e.message
+    );
+    assert!(
+        ex.seen.lock().unwrap().is_empty(),
+        "the exchange is never called"
+    );
 }
 
 #[test]

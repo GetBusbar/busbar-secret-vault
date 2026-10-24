@@ -136,14 +136,6 @@ impl<'a> HostExchange<'a> {
     }
 }
 
-/// The path and query of `url` (`/v1/kv/data/x`), the target the framed request names.
-fn path_of(url: &str) -> String {
-    url.parse::<http::Uri>()
-        .ok()
-        .and_then(|u| u.path_and_query().map(|p| p.as_str().to_owned()))
-        .unwrap_or_else(|| "/".to_owned())
-}
-
 impl Exchange for HostExchange<'_> {
     fn exchange(&self, _ticket: (u32, u32), request: &Request) -> Exchanged {
         let need = if request.trust_pem.is_some() {
@@ -154,7 +146,7 @@ impl Exchange for HostExchange<'_> {
         let answered = self.op.exchange(need, None, || {
             Ok(sdk::Request {
                 method: request.method.as_bytes().to_vec(),
-                target: path_of(&request.url).into_bytes(),
+                target: request.target.clone().into_bytes(),
                 fields: request
                     .fields
                     .iter()

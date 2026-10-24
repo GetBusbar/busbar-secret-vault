@@ -177,6 +177,9 @@ pub struct Request {
     pub method: &'static str,
     /// The full target URL, `{addr}/v1/{path}`. Carries no secret.
     pub url: String,
+    /// The framed request's target: the path and query the host sends to the need's pinned target
+    /// (`addr`'s own path prefix included). Carries no secret.
+    pub target: String,
     /// The head fields: `X-Vault-Token`.
     pub fields: Vec<(&'static str, Vec<u8>)>,
     /// The connect + total timeout, in milliseconds.
@@ -192,6 +195,7 @@ impl std::fmt::Debug for Request {
         f.debug_struct("Request")
             .field("method", &self.method)
             .field("url", &self.url)
+            .field("target", &self.target)
             .field(
                 "fields",
                 &self.fields.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
@@ -274,19 +278,38 @@ impl VaultClient {
         format!("{}/v1/{}", self.addr, vault_path.trim_start_matches('/'))
     }
 
-    /// The one request a read of `vault_path` sends.
-    #[must_use]
-    pub fn request(&self, vault_path: &str) -> Request {
-        Request {
+    /// The one request a read of `vault_path` sends. Its `target` is the path and query of
+    /// `{addr}/v1/{path}` with the bytes a URI cannot hold percent-encoded; it is never a fallback.
+    ///
+    /// # Errors
+    /// [`SecretErrorKind::Unavailable`]: the request URL is not a valid URL.
+    pub fn request(&self, vault_path: &str) -> SecretResult<Request> {
+        let url = self.url(vault_path);
+        let encoded = encode_path(vault_path.trim_start_matches('/'));
+        let target = format!("{}/v1/{encoded}", self.addr)
+            .parse::<http::Uri>()
+            .map_err(|e| e.to_string())
+            .and_then(|u| {
+                u.path_and_query()
+                    .map(|p| p.as_str().to_owned())
+                    .ok_or_else(|| "no path".to_owned())
+            })
+            .map_err(|cause| {
+                SecretModuleError::unavailable(format!(
+                    "request to Vault ({url}) failed: the request URL is not a valid URL: {cause}"
+                ))
+            })?;
+        Ok(Request {
             method: "GET",
-            url: self.url(vault_path),
+            url,
+            target,
             fields: vec![("X-Vault-Token", self.token.clone())],
             timeout_ms: self.timeout_secs.saturating_mul(1000),
             trust_pem: self.ca_cert_pem.clone(),
             // One byte past the cap tells "at the cap" from "over it" even if the host reports no
             // full length.
             body_cap: MAX_VAULT_RESPONSE_BYTES + 1,
-        }
+        })
     }
 
     /// Resolve `settings` (a reference) through `exchange` for the op on `ticket`: `None` while
@@ -301,12 +324,31 @@ impl VaultClient {
             Ok(r) => r,
             Err(e) => return Some(Err(e)),
         };
-        let request = self.request(&path);
+        let request = match self.request(&path) {
+            Ok(r) => r,
+            Err(e) => return Some(Err(e)),
+        };
         match exchange.exchange(ticket, &request) {
             Exchanged::Pending => None,
             Exchanged::Done(result) => Some(judge(&path, &field, &request.url, result)),
         }
     }
+}
+
+/// `path` as a request target: every byte a URI cannot hold (C0 controls, space, `"`, `#`, `<`, `>`,
+/// a backtick, `{`, `}`, DEL and anything >= 0x80) written `%XX`; the rest, `?` (which keeps starting
+/// the query, as 1.5.5) and `%` included, unchanged. A `#` in `path` is therefore data, never a
+/// fragment.
+fn encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for &b in path.as_bytes() {
+        if b <= 0x20 || b >= 0x7F || matches!(b, b'"' | b'#' | b'<' | b'>' | b'`' | b'{' | b'}') {
+            out.push_str(&format!("%{b:02X}"));
+        } else {
+            out.push(char::from(b));
+        }
+    }
+    out
 }
 
 /// `http`'s status rendering (`"404 Not Found"`), the text 1.5.5's client printed.
