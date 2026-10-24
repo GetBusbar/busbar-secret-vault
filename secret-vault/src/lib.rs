@@ -275,7 +275,7 @@ impl VaultClient {
     #[must_use]
     pub fn new(cfg: &VaultConfig, token: &[u8]) -> Self {
         Self {
-            addr: cfg.addr.trim_end_matches('/').to_string(),
+            addr: without_userinfo(cfg.addr.trim_end_matches('/')),
             token: Zeroizing::new(token.to_vec()),
             timeout_secs: cfg.timeout_secs,
             ca_cert_pem: cfg.ca_cert_pem.clone(),
@@ -342,6 +342,24 @@ impl VaultClient {
             Exchanged::Pending => None,
             Exchanged::Done(result) => Some(judge(&path, &field, &request.url, result)),
         }
+    }
+}
+
+/// `addr` with any userinfo removed: the host strips it from the dial target as a credential, so it
+/// must never reach a refusal text or `Debug`. The authority is the text after `://` (when a scheme
+/// is there, else from the start) up to the first `/`, `?` or `#`; everything up to and including
+/// its LAST `@` is dropped.
+fn without_userinfo(addr: &str) -> String {
+    let start = match addr.find("://") {
+        Some(i) if !addr[..i].contains(['/', '?', '#']) => i + 3,
+        _ => 0,
+    };
+    let end = addr[start..]
+        .find(['/', '?', '#'])
+        .map_or(addr.len(), |i| start + i);
+    match addr[start..end].rfind('@') {
+        Some(at) => format!("{}{}", &addr[..start], &addr[start + at + 1..]),
+        None => addr.to_string(),
     }
 }
 

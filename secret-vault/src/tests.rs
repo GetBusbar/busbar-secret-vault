@@ -627,6 +627,40 @@ fn an_addr_that_is_no_url_is_refused_before_any_exchange() {
     );
 }
 
+/// An `addr` carrying userinfo never prints it: not in a refusal text, not in `Debug`.
+#[test]
+fn addr_userinfo_is_never_printed() {
+    let reference = settings(json!({ "path": "kv/data/x#k" }));
+    for (addr, shown) in [
+        (
+            "https://svc:s3cret@vault:8200",
+            "https://vault:8200/v1/kv/data/x",
+        ),
+        (
+            "https://svc:s3cret@vault:8200/",
+            "https://vault:8200/v1/kv/data/x",
+        ),
+        (
+            "https://a@b:s3cret@vault:8200/p",
+            "https://vault:8200/p/v1/kv/data/x",
+        ),
+        ("svc:s3cret@vault:8200", "vault:8200/v1/kv/data/x"),
+        (
+            "https://vault:8200/p@q",
+            "https://vault:8200/p@q/v1/kv/data/x",
+        ),
+    ] {
+        let c = VaultClient::new(&cfg(addr), TOKEN);
+        let e = c
+            .resolve(&reference, &Canned::status(404, "{}"), T)
+            .unwrap()
+            .unwrap_err();
+        assert!(e.message.contains(shown), "{}", e.message);
+        assert!(!e.message.contains("s3cret"), "{}", e.message);
+        assert!(!format!("{c:?}").contains("s3cret"));
+    }
+}
+
 #[test]
 fn every_error_class_has_its_abi_code() {
     use busbar_contract::abi::secret as s;
