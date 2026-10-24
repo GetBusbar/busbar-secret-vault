@@ -493,6 +493,41 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
     );
 }
 
+/// 1.5.5 judges the body cap before any other non-2xx: an over-cap 400 or 418 is the cap refusal,
+/// while an over-cap 403 and 503 keep their own classes.
+#[test]
+fn the_body_cap_is_judged_before_any_other_non_2xx() {
+    let cap = MAX_VAULT_RESPONSE_BYTES;
+    let over = |status| {
+        Canned::of(Ok(Response {
+            status,
+            body: vec![b'x'; cap + 1],
+            body_len: cap + 1,
+        }))
+    };
+    let reference = || json!({ "path": "kv/data/openai#k" });
+    for status in [400, 418] {
+        let e = run(&over(status), reference()).unwrap_err();
+        assert_eq!(e.kind, SecretErrorKind::Unavailable, "{status}");
+        assert_eq!(
+            e.message,
+            format!(
+                "Vault response body exceeds the {cap}-byte cap (path \"kv/data/openai\", {URL})"
+            ),
+            "{status}"
+        );
+    }
+    let e = run(&over(403), reference()).unwrap_err();
+    assert_eq!(e.kind, SecretErrorKind::Denied);
+    let e = run(&over(503), reference()).unwrap_err();
+    assert_eq!(e.kind, SecretErrorKind::Unavailable);
+    assert!(
+        e.message.starts_with("Vault server error reading path"),
+        "{}",
+        e.message
+    );
+}
+
 /// An exchange that pends once, then answers: the op answers "not yet", and the re-invoked op
 /// on the same ticket receives the stored result without a second request.
 struct PendsOnce {
