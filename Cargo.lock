@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "busbar-secret-vault"
-version = "1.0.0"
+version = "1.6.0"
 dependencies = [
  "busbar-contract",
  "http",
@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "busbar-secret-vault-plugin"
-version = "1.0.0"
+version = "1.6.0"
 dependencies = [
  "busbar-contract",
  "busbar-core-connector",
