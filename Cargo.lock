@@ -396,6 +396,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "zeroize",
 ]
 
 [[package]]

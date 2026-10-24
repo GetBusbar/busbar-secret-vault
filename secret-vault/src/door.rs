@@ -31,6 +31,7 @@ use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::abi::secret::{cancel, ResolveIn, ResolveOut, ERROR_KIND_UNSET};
 use busbar_contract::secret::SecretResult;
+use zeroize::Zeroize;
 
 use crate::{error_kind, parse_config, settings_of, Exchange, Exchanged, Request, VaultClient};
 
@@ -159,15 +160,17 @@ impl Exchange for HostExchange<'_> {
         match answered {
             std::task::Poll::Pending => Exchanged::Pending,
             std::task::Poll::Ready(Err(e)) => Exchanged::Done(Err(e.to_string())),
-            std::task::Poll::Ready(Ok(r)) => {
+            std::task::Poll::Ready(Ok(mut r)) => {
+                // A copy of at most the cap, then the whole reply is wiped: no tail is left behind.
                 let body_len = r.body.len();
-                let mut body = r.body;
-                body.truncate(request.body_cap);
-                Exchanged::Done(Ok(crate::Response {
+                let kept = body_len.min(request.body_cap);
+                let response = crate::Response {
                     status: r.status,
-                    body,
+                    body: r.body[..kept].to_vec(),
                     body_len,
-                }))
+                };
+                r.zeroize();
+                Exchanged::Done(Ok(response))
             }
         }
     }

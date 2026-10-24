@@ -581,7 +581,7 @@ fn the_framed_target_is_the_path_and_query() {
 #[test]
 fn the_framed_target_percent_encodes_what_a_uri_cannot_hold() {
     let c = VaultClient::new(&cfg("https://v:8200"), TOKEN);
-    let target = |p: &str| c.request(p).unwrap().target;
+    let target = |p: &str| c.request(p).unwrap().target.clone();
     assert_eq!(target("kv/data/my app"), "/v1/kv/data/my%20app");
     assert_eq!(target("kv/data/caf\u{e9}"), "/v1/kv/data/caf%C3%A9");
     assert_eq!(target("a<b>`"), "/v1/a%3Cb%3E%60");
