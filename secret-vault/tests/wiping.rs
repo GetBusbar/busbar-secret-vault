@@ -79,7 +79,7 @@ fn nothing_the_plugin_frees_still_holds_the_token_or_the_value() {
         .unwrap()
         .clone();
 
-    // The body is built to its exact capacity, so no growth frees a partial copy; it is then moved
+    // The body is built in a buffer large enough that it never grows, so no growth frees a partial copy; it is then moved
     // (never copied) into the response, which owns it from there.
     let mut body: Vec<u8> = Vec::with_capacity(128);
     body.extend_from_slice(br#"{"data":{"data":{"k":""#);

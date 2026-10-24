@@ -402,8 +402,8 @@ fn status_text(status: u16) -> String {
 /// The copies of the material this holds are wiped when released: the response body (taken into a
 /// `Zeroizing` buffer), the parsed JSON tree (every string value, on every return path) and the
 /// rendering of a non-string value; the selected string is moved out of the tree, not cloned.
-/// Residual: `serde_json` keeps a private scratch buffer for strings that contain JSON escapes,
-/// which safe code cannot wipe.
+/// Residual (safe code cannot reach either): `serde_json`'s private scratch buffer for strings
+/// that contain JSON escapes, and the strings it had built when a body fails to parse partway.
 ///
 /// # Errors
 /// The classified refusal; its text never carries the token or the material.

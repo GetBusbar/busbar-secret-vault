@@ -199,7 +199,7 @@ get`/the Vault UI show), with the field to extract named either as a
 `cargo test` (run at the workspace root) runs:
 
 - `busbar-secret-vault`'s hermetic unit tests: reference parsing, the
-  request it builds, every 1.5.5 response class and its exact text, the
+  request it builds, every 1.5.5 response class and its text (a transport failure appends the host's cause), the
   body cap, a pending exchange, the config refusals, and the door's
   lease map (READY under a lease, zeroed on release, FAILED with its
   `ERROR_KIND_*`, PENDING then resumed). One test reads a real Vault
