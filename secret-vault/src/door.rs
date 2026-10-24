@@ -137,14 +137,19 @@ impl<'a> HostExchange<'a> {
     }
 }
 
+/// The need a request goes over: [`NEED_OPERATOR_CA`] when it names an operator CA, else
+/// [`NEED_PUBLIC`].
+fn need_for(request: &Request) -> u32 {
+    if request.trust_pem.is_some() {
+        NEED_OPERATOR_CA
+    } else {
+        NEED_PUBLIC
+    }
+}
+
 impl Exchange for HostExchange<'_> {
     fn exchange(&self, _ticket: (u32, u32), request: &Request) -> Exchanged {
-        let need = if request.trust_pem.is_some() {
-            NEED_OPERATOR_CA
-        } else {
-            NEED_PUBLIC
-        };
-        let answered = self.op.exchange(need, None, || {
+        let answered = self.op.exchange(need_for(request), None, || {
             Ok(sdk::Request {
                 method: request.method.as_bytes().to_vec(),
                 target: request.target.clone().into_bytes(),
