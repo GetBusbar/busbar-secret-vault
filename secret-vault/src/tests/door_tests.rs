@@ -116,3 +116,47 @@ fn the_statement_names_the_plugin_and_its_token_reference() {
     assert_eq!(STATEMENT.name.len, crate::NAME.len());
     assert_eq!(STATEMENT.max_inflight, 64);
 }
+
+/// Records the `X-Vault-Token` of each request it answers.
+struct Recording {
+    tokens: std::sync::Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl Exchange for Recording {
+    fn exchange(&self, _: (u32, u32), r: &Request) -> Exchanged {
+        let token = r
+            .fields
+            .iter()
+            .find(|(n, _)| *n == "X-Vault-Token")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        self.tokens.lock().unwrap().push(token);
+        Exchanged::Done(Ok(crate::Response {
+            status: 200,
+            body: OK_BODY.as_bytes().to_vec(),
+            body_len: OK_BODY.len(),
+        }))
+    }
+}
+
+/// A refresh swaps the client (the next read carries the new token); a refused refresh keeps the
+/// running one.
+#[test]
+fn a_refresh_swaps_the_client_and_a_refused_refresh_keeps_it() {
+    let tokens = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let cfg = crate::parse_config(SETTINGS).unwrap();
+    let v = Vault::new(
+        VaultClient::new(&cfg, b"tok1"),
+        Box::new(Recording {
+            tokens: tokens.clone(),
+        }),
+    );
+    assert!(v.refresh(SETTINGS, &[&b"tok2"[..]], 2).is_ok());
+    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert!(v.refresh(b"{}", &[&b"tok3"[..]], 3).is_err());
+    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert_eq!(
+        *tokens.lock().unwrap(),
+        vec![b"tok2".to_vec(), b"tok2".to_vec()]
+    );
+}
