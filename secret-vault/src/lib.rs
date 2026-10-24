@@ -363,9 +363,9 @@ fn status_text(status: u16) -> String {
 /// classes and texts, in 1.5.5's order: transport failure, 404, 403, 5xx, the body cap, any other
 /// non-2xx, then the KV v2 shape and the field.
 ///
-/// A transport failure reads as 1.5.5 printed every one of them (refused, unresolvable, TLS,
-/// timeout alike): its HTTP client's fixed `error sending request for url (..)`, which never carried
-/// the cause. The host's own failure text is therefore not part of the refusal.
+/// A transport failure keeps 1.5.5's text (`error sending request for url (..)`) as its prefix and
+/// the host's own cause follows it (`: {cause}`), so a refused need, an unarmed host or an oversize
+/// reply is explained; an empty cause leaves exactly the 1.5.5 text.
 ///
 /// # Errors
 /// The classified refusal; its text never carries the token or the material.
@@ -375,9 +375,15 @@ pub fn judge(
     url: &str,
     result: Result<Response, String>,
 ) -> SecretResult<Vec<u8>> {
-    let resp = result.map_err(|_| {
+    let resp = result.map_err(|cause| {
+        let cause = cause.trim();
+        let tail = if cause.is_empty() {
+            String::new()
+        } else {
+            format!(": {cause}")
+        };
         SecretModuleError::unavailable(format!(
-            "request to Vault ({url}) failed: error sending request for url ({url})"
+            "request to Vault ({url}) failed: error sending request for url ({url}){tail}"
         ))
     })?;
     let status = resp.status;
