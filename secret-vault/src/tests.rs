@@ -40,6 +40,22 @@ fn explicit_field_wins_over_a_hash_in_path() {
 }
 
 #[test]
+fn a_non_string_field_is_refused_not_ignored() {
+    for s in [
+        json!({ "path": "kv/data/x#old", "field": 123 }),
+        json!({ "path": "kv/data/x", "field": 7 }),
+        json!({ "path": "kv/data/x", "field": null }),
+    ] {
+        let err = parse_reference(&settings(s)).unwrap_err();
+        assert_eq!(err.kind, SecretErrorKind::Invalid);
+        assert_eq!(
+            err.message,
+            "`field` in secret reference settings must be a string"
+        );
+    }
+}
+
+#[test]
 fn missing_path_is_rejected() {
     let s = settings(json!({ "field": "api_key" }));
     let err = parse_reference(&s).unwrap_err();

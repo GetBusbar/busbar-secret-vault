@@ -113,7 +113,8 @@ pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
 
 /// Split a per-reference `settings` map into `(vault_path, field)`. Fail-closed: a missing `path`,
 /// or a `path` with no `#field` suffix and no separate `field` key, is an `Err` naming exactly
-/// what's missing. Texts are 1.5.5's.
+/// what's missing, and a `field` that is not a string is refused rather than ignored. Texts are
+/// 1.5.5's.
 ///
 /// # Errors
 /// [`SecretErrorKind::Invalid`], naming what is missing.
@@ -128,7 +129,10 @@ pub fn parse_reference(
         })?;
 
     // Explicit `field` wins over any `#` embedded in `path`.
-    if let Some(field) = settings.get("field").and_then(|v| v.as_str()) {
+    if let Some(field) = settings.get("field") {
+        let field = field.as_str().ok_or_else(|| {
+            SecretModuleError::invalid("`field` in secret reference settings must be a string")
+        })?;
         if field.is_empty() {
             return Err(SecretModuleError::invalid(
                 "`field` in secret reference settings must not be empty",
