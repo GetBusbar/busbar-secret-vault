@@ -46,7 +46,9 @@
 //!
 //! Fail-closed and specific, as 1.5.5: a 404 (no secret at that path), a 403 (bad token / missing
 //! Vault policy) and a 5xx (Vault itself unhealthy) are distinct, human-readable errors, each tagged
-//! with its `abi::secret::ERROR_KIND_*`.
+//! with its `abi::secret::ERROR_KIND_*`. No refusal carries the token, the material or any text of
+//! Vault's reply (its body, or the names of the fields it holds); an empty field is refused, never
+//! resolved empty.
 
 #![forbid(unsafe_code)]
 
@@ -78,7 +80,7 @@ fn default_timeout_secs() -> u64 {
 
 /// The open-time settings — the `secrets.<module>.settings` map, as 1.5.5 read it. `token` is its
 /// secret reference as written (the material arrives through `open`'s secrets, never here).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VaultConfig {
     /// The Vault server address, e.g. `https://vault.internal:8200`. A trailing slash is tolerated.
@@ -95,8 +97,23 @@ pub struct VaultConfig {
     pub timeout_secs: u64,
 }
 
+/// `Debug` prints the address without its userinfo and never the token's reference or the CA.
+impl std::fmt::Debug for VaultConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultConfig")
+            .field("addr", &without_userinfo(&self.addr))
+            .field("ca_cert_pem", &self.ca_cert_pem.is_some())
+            .field("timeout_secs", &self.timeout_secs)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Parse the open-time settings bytes, with 1.5.5's refusal texts: an empty (or whitespace-only)
-/// config and a malformed one are refused, naming the plugin.
+/// config and a malformed one are refused, naming the plugin. Then each value is judged, so
+/// `validate`, `open` and `refresh` refuse what could never serve, naming the key and never
+/// quoting its value: an `addr` that is not an `http://` or `https://` URL naming a host (or that
+/// carries a query or fragment, which the request URL cannot carry), a `ca_cert_pem` holding no PEM
+/// certificate, and a `timeout_secs` of 0.
 ///
 /// # Errors
 /// The operator-facing refusal text.
@@ -108,13 +125,55 @@ pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
             "hashicorp-vault plugin requires config (addr, token); none provided".to_string(),
         );
     }
-    serde_json::from_str(text).map_err(|e| format!("invalid hashicorp-vault plugin config: {e}"))
+    let cfg: VaultConfig = serde_json::from_str(text)
+        .map_err(|e| format!("invalid hashicorp-vault plugin config: {e}"))?;
+    if !addr_is_a_server_url(&cfg.addr) {
+        return Err(
+            "invalid hashicorp-vault plugin config: `addr` must be an http:// or \
+                    https:// URL naming the Vault server (e.g. https://vault.internal:8200), with \
+                    no query or fragment"
+                .to_string(),
+        );
+    }
+    if let Some(pem) = &cfg.ca_cert_pem {
+        let begin = pem.find("-----BEGIN CERTIFICATE-----");
+        let end = pem.find("-----END CERTIFICATE-----");
+        if !matches!((begin, end), (Some(b), Some(e)) if b < e) {
+            return Err(
+                "invalid hashicorp-vault plugin config: `ca_cert_pem` holds no PEM \
+                        certificate (-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----)"
+                    .to_string(),
+            );
+        }
+    }
+    if cfg.timeout_secs == 0 {
+        return Err(
+            "invalid hashicorp-vault plugin config: `timeout_secs` must be at least 1".to_string(),
+        );
+    }
+    Ok(cfg)
+}
+
+/// Whether `addr` (its userinfo aside, which is stripped as a credential) is an absolute `http` or
+/// `https` URL with a host and no query or fragment: the base every request URL is built on.
+fn addr_is_a_server_url(addr: &str) -> bool {
+    let addr = without_userinfo(addr.trim_end_matches('/'));
+    if addr.contains(['?', '#']) {
+        return false;
+    }
+    match addr.parse::<http::Uri>() {
+        Ok(u) => {
+            matches!(u.scheme_str(), Some("http" | "https"))
+                && u.host().is_some_and(|h| !h.is_empty())
+        }
+        Err(_) => false,
+    }
 }
 
 /// Split a per-reference `settings` map into `(vault_path, field)`. Fail-closed: a missing `path`,
 /// or a `path` with no `#field` suffix and no separate `field` key, is an `Err` naming exactly
 /// what's missing, and a `field` that is not a string is refused rather than ignored. Texts are
-/// 1.5.5's.
+/// 1.5.5's; a blank `path` and a setting other than `path` and `field` are refused too (1.6.0).
 ///
 /// # Errors
 /// [`SecretErrorKind::Invalid`], naming what is missing.
@@ -127,6 +186,20 @@ pub fn parse_reference(
         .ok_or_else(|| {
             SecretModuleError::invalid("missing or non-string `path` in secret reference settings")
         })?;
+    if path.trim().is_empty() {
+        return Err(SecretModuleError::invalid(
+            "`path` in secret reference settings must not be blank",
+        ));
+    }
+    if let Some(other) = settings
+        .keys()
+        .find(|k| !matches!(k.as_str(), "path" | "field"))
+    {
+        return Err(SecretModuleError::invalid(format!(
+            "vault secret reference does not take settings.{other}; it names only settings.path \
+             and settings.field (fail-closed)"
+        )));
+    }
 
     // Explicit `field` wins over any `#` embedded in `path`.
     if let Some(field) = settings.get("field") {
@@ -221,8 +294,9 @@ impl std::fmt::Debug for Request {
     }
 }
 
-/// ONE framed http response, as the exchange answers it. Dropping it zeroizes the body.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// ONE framed http response, as the exchange answers it. Dropping it zeroizes the body, and `Debug`
+/// never prints it (it may hold the material).
+#[derive(Clone, PartialEq, Eq)]
 pub struct Response {
     /// The status code.
     pub status: u16,
@@ -235,6 +309,15 @@ pub struct Response {
 impl Drop for Response {
     fn drop(&mut self) {
         self.body.zeroize();
+    }
+}
+
+impl std::fmt::Debug for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Response")
+            .field("status", &self.status)
+            .field("body_len", &self.body_len)
+            .finish_non_exhaustive()
     }
 }
 
@@ -451,10 +534,17 @@ pub fn judge(
     }
     let body = Zeroizing::new(std::mem::take(&mut resp.body));
 
-    if !(200..300).contains(&status) {
-        let excerpt: String = String::from_utf8_lossy(&body).chars().take(300).collect();
+    // No text of the reply is quoted: a body is Vault's, and may carry what it guards.
+    if (300..400).contains(&status) {
         return Err(SecretModuleError::internal(format!(
-            "Vault returned HTTP {} reading path {vault_path:?} ({url}): {excerpt}",
+            "Vault returned HTTP {} reading path {vault_path:?} ({url}): a redirect is not \
+             followed; set `addr` to the address Vault redirects to (e.g. the active node)",
+            status_text(status)
+        )));
+    }
+    if !(200..300).contains(&status) {
+        return Err(SecretModuleError::internal(format!(
+            "Vault returned HTTP {} reading path {vault_path:?} ({url})",
             status_text(status)
         )));
     }
@@ -477,14 +567,16 @@ pub fn judge(
         })?;
 
     let Some(value) = data.get_mut(field) else {
-        let available: Vec<&str> = data.keys().map(String::as_str).collect();
         return Err(SecretModuleError::not_found(format!(
-            "Vault secret at path {vault_path:?} has no field {field:?}; available fields: \
-             {available:?}"
+            "Vault secret at path {vault_path:?} has no field {field:?}"
         )));
     };
 
     match value {
+        serde_json::Value::String(s) if s.is_empty() => Err(SecretModuleError::invalid(format!(
+            "Vault secret at path {vault_path:?} field {field:?} is EMPTY; a secret must be \
+             non-empty (fail-closed)"
+        ))),
         serde_json::Value::String(s) => Ok(std::mem::take(s).into_bytes()),
         other => Ok(render(other)),
     }
