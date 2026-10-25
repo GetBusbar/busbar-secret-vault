@@ -117,12 +117,78 @@ fn the_statement_names_the_plugin_and_its_token_reference() {
     assert_eq!(STATEMENT.max_inflight, 64);
 }
 
-/// The framed request names the read's path and query, never the authority (that is the need's).
+/// Records the `X-Vault-Token` of each request it answers.
+struct Recording {
+    tokens: std::sync::Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl Exchange for Recording {
+    fn exchange(&self, _: (u32, u32), r: &Request) -> Exchanged {
+        let token = r
+            .fields
+            .iter()
+            .find(|(n, _)| *n == "X-Vault-Token")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        self.tokens.lock().unwrap().push(token);
+        Exchanged::Done(Ok(crate::Response {
+            status: 200,
+            body: OK_BODY.as_bytes().to_vec(),
+            body_len: OK_BODY.len(),
+        }))
+    }
+}
+
+/// A refresh swaps the client (the next read carries the new token); a refused refresh keeps the
+/// running one.
 #[test]
-fn the_framed_request_names_the_path() {
-    assert_eq!(
-        super::path_of("https://vault.internal:8200/v1/kv/data/x?version=2"),
-        "/v1/kv/data/x?version=2"
+fn a_refresh_swaps_the_client_and_a_refused_refresh_keeps_it() {
+    let tokens = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let cfg = crate::parse_config(SETTINGS).unwrap();
+    let v = Vault::new(
+        VaultClient::new(&cfg, b"tok1"),
+        Box::new(Recording {
+            tokens: tokens.clone(),
+        }),
     );
-    assert_eq!(super::path_of("not a url"), "/");
+    assert!(v.refresh(SETTINGS, &[&b"tok2"[..]], 2).is_ok());
+    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert!(v.refresh(b"{}", &[&b"tok3"[..]], 3).is_err());
+    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert_eq!(
+        *tokens.lock().unwrap(),
+        vec![b"tok2".to_vec(), b"tok2".to_vec()]
+    );
+}
+
+/// The need a request goes over carries the CA exactly when the request names one, and both needs
+/// are the operator-infrastructure outbound `http` need to `settings.addr`. Read through `NEEDS`
+/// (what the Statement declares), not the constants, so swapped constants fail.
+#[test]
+fn the_needs_and_the_need_selection() {
+    let c = VaultClient::new(&crate::parse_config(SETTINGS).unwrap(), b"tok");
+    let without = c.request("kv/data/x").unwrap();
+    let mut with_cfg = crate::parse_config(SETTINGS).unwrap();
+    with_cfg.ca_cert_pem = Some("-----BEGIN CERTIFICATE-----".into());
+    let with_pem = VaultClient::new(&with_cfg, b"tok")
+        .request("kv/data/x")
+        .unwrap();
+
+    let trusted = &NEEDS[need_for(&with_pem) as usize];
+    assert_eq!(trusted.trust_from.len, "settings.ca_cert_pem".len());
+    assert!(!trusted.trust_from.ptr.is_null());
+    let public = &NEEDS[need_for(&without) as usize];
+    assert!(public.trust_from.ptr.is_null());
+
+    assert_eq!(STATEMENT.needs, NEEDS.as_ptr());
+    assert_eq!(STATEMENT.needs_len, 2);
+    assert_eq!(NEEDS.len(), 2);
+    for n in NEEDS {
+        assert_eq!(n.target_from.len, "settings.addr".len());
+        assert!(!n.target_from.ptr.is_null());
+        assert_eq!(n.transport.len, "http".len());
+        assert_eq!(n.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE);
+        assert_eq!(n.direction, DIRECTION_OUTBOUND);
+        assert_eq!(n.keep_mode, KEEP_NAMED);
+    }
 }

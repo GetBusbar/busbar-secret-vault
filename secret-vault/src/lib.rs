@@ -56,6 +56,7 @@ use busbar_contract::abi::secret::{
 };
 use busbar_contract::secret::{SecretErrorKind, SecretModuleError, SecretResult};
 use serde::Deserialize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub mod door;
 
@@ -112,7 +113,8 @@ pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
 
 /// Split a per-reference `settings` map into `(vault_path, field)`. Fail-closed: a missing `path`,
 /// or a `path` with no `#field` suffix and no separate `field` key, is an `Err` naming exactly
-/// what's missing. Texts are 1.5.5's.
+/// what's missing, and a `field` that is not a string is refused rather than ignored. Texts are
+/// 1.5.5's.
 ///
 /// # Errors
 /// [`SecretErrorKind::Invalid`], naming what is missing.
@@ -127,7 +129,10 @@ pub fn parse_reference(
         })?;
 
     // Explicit `field` wins over any `#` embedded in `path`.
-    if let Some(field) = settings.get("field").and_then(|v| v.as_str()) {
+    if let Some(field) = settings.get("field") {
+        let field = field.as_str().ok_or_else(|| {
+            SecretModuleError::invalid("`field` in secret reference settings must be a string")
+        })?;
         if field.is_empty() {
             return Err(SecretModuleError::invalid(
                 "`field` in secret reference settings must not be empty",
@@ -171,12 +176,16 @@ pub const fn error_kind(kind: SecretErrorKind) -> u32 {
 }
 
 /// ONE framed http request, as the plugin hands it to the host's exchange. The token rides as a
-/// head field; `Debug` never prints field values.
+/// head field; `Debug` never prints field values, and dropping the request zeroizes them.
 pub struct Request {
     /// The method (`GET`).
     pub method: &'static str,
-    /// The full target URL, `{addr}/v1/{path}`. Carries no secret.
+    /// The display form of the target URL, `{addr}/v1/{path}` with any `addr` userinfo removed: the
+    /// URL every refusal text prints. Carries no secret.
     pub url: String,
+    /// The framed request's target: the path and query the host sends to the need's pinned target
+    /// (`addr`'s own path prefix included). Carries no secret.
+    pub target: String,
     /// The head fields: `X-Vault-Token`.
     pub fields: Vec<(&'static str, Vec<u8>)>,
     /// The connect + total timeout, in milliseconds.
@@ -187,11 +196,20 @@ pub struct Request {
     pub body_cap: usize,
 }
 
+impl Drop for Request {
+    fn drop(&mut self) {
+        for (_, v) in &mut self.fields {
+            v.zeroize();
+        }
+    }
+}
+
 impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Request")
             .field("method", &self.method)
             .field("url", &self.url)
+            .field("target", &self.target)
             .field(
                 "fields",
                 &self.fields.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
@@ -203,7 +221,7 @@ impl std::fmt::Debug for Request {
     }
 }
 
-/// ONE framed http response, as the exchange answers it.
+/// ONE framed http response, as the exchange answers it. Dropping it zeroizes the body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
     /// The status code.
@@ -212,6 +230,12 @@ pub struct Response {
     pub body: Vec<u8>,
     /// The body's full length (the short-buffer rule's `needed`); over `body_cap` = too big.
     pub body_len: usize,
+}
+
+impl Drop for Response {
+    fn drop(&mut self) {
+        self.body.zeroize();
+    }
 }
 
 /// What an exchange answered for one call.
@@ -235,7 +259,7 @@ pub trait Exchange {
 /// once at `open` (and at `refresh`) and reused for every `resolve`.
 pub struct VaultClient {
     addr: String,
-    token: Vec<u8>,
+    token: Zeroizing<Vec<u8>>,
     timeout_secs: u64,
     ca_cert_pem: Option<String>,
 }
@@ -250,19 +274,13 @@ impl std::fmt::Debug for VaultClient {
     }
 }
 
-impl Drop for VaultClient {
-    fn drop(&mut self) {
-        self.token.fill(0);
-    }
-}
-
 impl VaultClient {
     /// The client for `cfg`, with the token material the kernel resolved.
     #[must_use]
     pub fn new(cfg: &VaultConfig, token: &[u8]) -> Self {
         Self {
-            addr: cfg.addr.trim_end_matches('/').to_string(),
-            token: token.to_vec(),
+            addr: without_userinfo(cfg.addr.trim_end_matches('/')),
+            token: Zeroizing::new(token.to_vec()),
             timeout_secs: cfg.timeout_secs,
             ca_cert_pem: cfg.ca_cert_pem.clone(),
         }
@@ -274,19 +292,38 @@ impl VaultClient {
         format!("{}/v1/{}", self.addr, vault_path.trim_start_matches('/'))
     }
 
-    /// The one request a read of `vault_path` sends.
-    #[must_use]
-    pub fn request(&self, vault_path: &str) -> Request {
-        Request {
+    /// The one request a read of `vault_path` sends. Its `target` is the path and query of
+    /// `{addr}/v1/{path}` with the bytes a URI cannot hold percent-encoded; it is never a fallback.
+    ///
+    /// # Errors
+    /// [`SecretErrorKind::Unavailable`]: the request URL is not a valid URL.
+    pub fn request(&self, vault_path: &str) -> SecretResult<Request> {
+        let url = self.url(vault_path);
+        let encoded = encode_path(vault_path.trim_start_matches('/'));
+        let target = format!("{}/v1/{encoded}", self.addr)
+            .parse::<http::Uri>()
+            .map_err(|e| e.to_string())
+            .and_then(|u| {
+                u.path_and_query()
+                    .map(|p| p.as_str().to_owned())
+                    .ok_or_else(|| "no path".to_owned())
+            })
+            .map_err(|cause| {
+                SecretModuleError::unavailable(format!(
+                    "request to Vault ({url}) failed: the request URL is not a valid URL: {cause}"
+                ))
+            })?;
+        Ok(Request {
             method: "GET",
-            url: self.url(vault_path),
-            fields: vec![("X-Vault-Token", self.token.clone())],
+            url,
+            target,
+            fields: vec![("X-Vault-Token", self.token.to_vec())],
             timeout_ms: self.timeout_secs.saturating_mul(1000),
             trust_pem: self.ca_cert_pem.clone(),
             // One byte past the cap tells "at the cap" from "over it" even if the host reports no
             // full length.
             body_cap: MAX_VAULT_RESPONSE_BYTES + 1,
-        }
+        })
     }
 
     /// Resolve `settings` (a reference) through `exchange` for the op on `ticket`: `None` while
@@ -301,12 +338,49 @@ impl VaultClient {
             Ok(r) => r,
             Err(e) => return Some(Err(e)),
         };
-        let request = self.request(&path);
+        let request = match self.request(&path) {
+            Ok(r) => r,
+            Err(e) => return Some(Err(e)),
+        };
         match exchange.exchange(ticket, &request) {
             Exchanged::Pending => None,
             Exchanged::Done(result) => Some(judge(&path, &field, &request.url, result)),
         }
     }
+}
+
+/// `addr` with any userinfo removed: the host strips it from the dial target as a credential, so it
+/// must never reach a refusal text or `Debug`. The authority is the text after `://` (when a scheme
+/// is there, else from the start) up to the first `/`, `?` or `#`; everything up to and including
+/// its LAST `@` is dropped.
+fn without_userinfo(addr: &str) -> String {
+    let start = match addr.find("://") {
+        Some(i) if !addr[..i].contains(['/', '?', '#']) => i + 3,
+        _ => 0,
+    };
+    let end = addr[start..]
+        .find(['/', '?', '#'])
+        .map_or(addr.len(), |i| start + i);
+    match addr[start..end].rfind('@') {
+        Some(at) => format!("{}{}", &addr[..start], &addr[start + at + 1..]),
+        None => addr.to_string(),
+    }
+}
+
+/// `path` as a request target: every byte a URI cannot hold (C0 controls, space, `"`, `#`, `<`, `>`,
+/// a backtick, `{`, `}`, DEL and anything >= 0x80) written `%XX`; the rest, `?` (which keeps starting
+/// the query, as 1.5.5) and `%` included, unchanged. A `#` in `path` is therefore data, never a
+/// fragment.
+fn encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for &b in path.as_bytes() {
+        if b <= 0x20 || b >= 0x7F || matches!(b, b'"' | b'#' | b'<' | b'>' | b'`' | b'{' | b'}') {
+            out.push_str(&format!("%{b:02X}"));
+        } else {
+            out.push(char::from(b));
+        }
+    }
+    out
 }
 
 /// `http`'s status rendering (`"404 Not Found"`), the text 1.5.5's client printed.
@@ -321,9 +395,15 @@ fn status_text(status: u16) -> String {
 /// classes and texts, in 1.5.5's order: transport failure, 404, 403, 5xx, the body cap, any other
 /// non-2xx, then the KV v2 shape and the field.
 ///
-/// A transport failure reads as 1.5.5 printed every one of them (refused, unresolvable, TLS,
-/// timeout alike): its HTTP client's fixed `error sending request for url (..)`, which never carried
-/// the cause. The host's own failure text is therefore not part of the refusal.
+/// A transport failure keeps 1.5.5's text (`error sending request for url (..)`) as its prefix and
+/// the host's own cause follows it (`: {cause}`), so a refused need, an unarmed host or an oversize
+/// reply is explained; an empty cause leaves exactly the 1.5.5 text.
+///
+/// The copies of the material this holds are wiped when released: the response body (taken into a
+/// `Zeroizing` buffer), the parsed JSON tree (every string value, on every return path) and the
+/// rendering of a non-string value; the selected string is moved out of the tree, not cloned.
+/// Residual (safe code cannot reach either): `serde_json`'s private scratch buffer for strings
+/// that contain JSON escapes, and the strings it had built when a body fails to parse partway.
 ///
 /// # Errors
 /// The classified refusal; its text never carries the token or the material.
@@ -333,9 +413,15 @@ pub fn judge(
     url: &str,
     result: Result<Response, String>,
 ) -> SecretResult<Vec<u8>> {
-    let resp = result.map_err(|_| {
+    let mut resp = result.map_err(|cause| {
+        let cause = cause.trim();
+        let tail = if cause.is_empty() {
+            String::new()
+        } else {
+            format!(": {cause}")
+        };
         SecretModuleError::unavailable(format!(
-            "request to Vault ({url}) failed: error sending request for url ({url})"
+            "request to Vault ({url}) failed: error sending request for url ({url}){tail}"
         ))
     })?;
     let status = resp.status;
@@ -363,7 +449,7 @@ pub fn judge(
             "Vault response body exceeds the {cap}-byte cap (path {vault_path:?}, {url})"
         )));
     }
-    let body = resp.body;
+    let body = Zeroizing::new(std::mem::take(&mut resp.body));
 
     if !(200..300).contains(&status) {
         let excerpt: String = String::from_utf8_lossy(&body).chars().take(300).collect();
@@ -373,15 +459,16 @@ pub fn judge(
         )));
     }
 
-    let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
+    let mut tree = Wiped(serde_json::from_slice(&body).map_err(|e| {
         SecretModuleError::internal(format!(
             "Vault response for path {vault_path:?} is not valid JSON: {e}"
         ))
-    })?;
-    let data = v
-        .get("data")
-        .and_then(|d| d.get("data"))
-        .and_then(|d| d.as_object())
+    })?);
+    let data = tree
+        .0
+        .get_mut("data")
+        .and_then(|d| d.get_mut("data"))
+        .and_then(|d| d.as_object_mut())
         .ok_or_else(|| {
             SecretModuleError::invalid(format!(
                 "Vault response for path {vault_path:?} has no `data.data` object (not a KV v2 \
@@ -389,18 +476,58 @@ pub fn judge(
             ))
         })?;
 
-    let value = data.get(field).ok_or_else(|| {
+    let Some(value) = data.get_mut(field) else {
         let available: Vec<&str> = data.keys().map(String::as_str).collect();
-        SecretModuleError::not_found(format!(
+        return Err(SecretModuleError::not_found(format!(
             "Vault secret at path {vault_path:?} has no field {field:?}; available fields: \
              {available:?}"
-        ))
-    })?;
+        )));
+    };
 
     match value {
-        serde_json::Value::String(s) => Ok(s.clone().into_bytes()),
-        other => Ok(other.to_string().into_bytes()),
+        serde_json::Value::String(s) => Ok(std::mem::take(s).into_bytes()),
+        other => Ok(render(other)),
     }
+}
+
+/// A parsed response whose string values are zeroized when it is dropped, on every return path.
+struct Wiped(serde_json::Value);
+
+impl Drop for Wiped {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
+    }
+}
+
+/// Zeroize every string value under `v` (objects' values, arrays recursively); keys are field
+/// names and are left alone.
+fn wipe(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::String(s) => s.zeroize(),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(wipe),
+        serde_json::Value::Object(map) => map.iter_mut().for_each(|(_, x)| wipe(x)),
+        _ => {}
+    }
+}
+
+/// `v`'s JSON text in a buffer of exactly its length, so no growth frees a partial copy.
+fn render(v: &serde_json::Value) -> Vec<u8> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    // Serializing a `Value` to a writer cannot fail (its keys are strings).
+    let _ = serde_json::to_writer(&mut count, v);
+    let mut out = Vec::with_capacity(count.0);
+    let _ = serde_json::to_writer(&mut out, v);
+    out
 }
 
 #[cfg(test)]

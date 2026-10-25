@@ -40,6 +40,22 @@ fn explicit_field_wins_over_a_hash_in_path() {
 }
 
 #[test]
+fn a_non_string_field_is_refused_not_ignored() {
+    for s in [
+        json!({ "path": "kv/data/x#old", "field": 123 }),
+        json!({ "path": "kv/data/x", "field": 7 }),
+        json!({ "path": "kv/data/x", "field": null }),
+    ] {
+        let err = parse_reference(&settings(s)).unwrap_err();
+        assert_eq!(err.kind, SecretErrorKind::Invalid);
+        assert_eq!(
+            err.message,
+            "`field` in secret reference settings must be a string"
+        );
+    }
+}
+
+#[test]
 fn missing_path_is_rejected() {
     let s = settings(json!({ "field": "api_key" }));
     let err = parse_reference(&s).unwrap_err();
@@ -286,7 +302,7 @@ fn kv2(data: serde_json::Value) -> String {
 #[test]
 fn the_request_is_1_5_5s_get_with_the_token_header() {
     let c = VaultClient::new(&cfg(ADDR), TOKEN);
-    let r = c.request("/kv/data/openai");
+    let r = c.request("/kv/data/openai").expect("a valid URL");
     assert_eq!(r.method, "GET");
     assert_eq!(
         r.url, URL,
@@ -339,6 +355,14 @@ fn every_response_class_answers_1_5_5s_kind_and_text() {
     let cases: Vec<(Canned, SecretErrorKind, String)> = vec![
         (
             Canned::of(Err("connection refused".into())),
+            SecretErrorKind::Unavailable,
+            format!(
+                "request to Vault ({URL}) failed: error sending request for url ({URL}): \
+                 connection refused"
+            ),
+        ),
+        (
+            Canned::of(Err("  \n".into())),
             SecretErrorKind::Unavailable,
             format!("request to Vault ({URL}) failed: error sending request for url ({URL})"),
         ),
@@ -469,6 +493,41 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
     );
 }
 
+/// 1.5.5 judges the body cap before any other non-2xx: an over-cap 400 or 418 is the cap refusal,
+/// while an over-cap 403 and 503 keep their own classes.
+#[test]
+fn the_body_cap_is_judged_before_any_other_non_2xx() {
+    let cap = MAX_VAULT_RESPONSE_BYTES;
+    let over = |status| {
+        Canned::of(Ok(Response {
+            status,
+            body: vec![b'x'; cap + 1],
+            body_len: cap + 1,
+        }))
+    };
+    let reference = || json!({ "path": "kv/data/openai#k" });
+    for status in [400, 418] {
+        let e = run(&over(status), reference()).unwrap_err();
+        assert_eq!(e.kind, SecretErrorKind::Unavailable, "{status}");
+        assert_eq!(
+            e.message,
+            format!(
+                "Vault response body exceeds the {cap}-byte cap (path \"kv/data/openai\", {URL})"
+            ),
+            "{status}"
+        );
+    }
+    let e = run(&over(403), reference()).unwrap_err();
+    assert_eq!(e.kind, SecretErrorKind::Denied);
+    let e = run(&over(503), reference()).unwrap_err();
+    assert_eq!(e.kind, SecretErrorKind::Unavailable);
+    assert!(
+        e.message.starts_with("Vault server error reading path"),
+        "{}",
+        e.message
+    );
+}
+
 /// An exchange that pends once, then answers: the op answers "not yet", and the re-invoked op
 /// on the same ticket receives the stored result without a second request.
 struct PendsOnce {
@@ -547,9 +606,110 @@ fn the_extra_root_and_timeout_ride_the_request() {
     let mut c = cfg(ADDR);
     c.ca_cert_pem = Some("-----BEGIN CERTIFICATE-----".into());
     c.timeout_secs = 3;
-    let r = VaultClient::new(&c, TOKEN).request("kv/data/x");
+    let r = VaultClient::new(&c, TOKEN)
+        .request("kv/data/x")
+        .expect("a valid URL");
     assert_eq!(r.trust_pem.as_deref(), Some("-----BEGIN CERTIFICATE-----"));
     assert_eq!(r.timeout_ms, 3000);
+}
+
+/// The framed target is the path and query, `addr`'s own prefix included, the path carried verbatim
+/// (bytes a URI cannot hold percent-encoded; `?` still starts the query).
+#[test]
+fn the_framed_target_is_the_path_and_query() {
+    let c = VaultClient::new(&cfg("https://vault.internal:8200"), TOKEN);
+    assert_eq!(
+        c.request("kv/data/x?version=2").unwrap().target,
+        "/v1/kv/data/x?version=2"
+    );
+    let c = VaultClient::new(&cfg("https://v:8200/prefix/"), TOKEN);
+    assert_eq!(
+        c.request("kv/data/x").unwrap().target,
+        "/prefix/v1/kv/data/x"
+    );
+}
+
+#[test]
+fn the_framed_target_percent_encodes_what_a_uri_cannot_hold() {
+    let c = VaultClient::new(&cfg("https://v:8200"), TOKEN);
+    let target = |p: &str| c.request(p).unwrap().target.clone();
+    assert_eq!(target("kv/data/my app"), "/v1/kv/data/my%20app");
+    assert_eq!(target("kv/data/caf\u{e9}"), "/v1/kv/data/caf%C3%A9");
+    assert_eq!(target("a<b>`"), "/v1/a%3Cb%3E%60");
+    assert_eq!(target("kv/data/q?a=1&b=%20"), "/v1/kv/data/q?a=1&b=%20");
+    // A `#` that is part of the path (the `field` key form) is data, not a fragment.
+    let ex = Canned::status(200, &kv2(json!({ "k": "v" })));
+    let got = c
+        .resolve(
+            &settings(json!({ "path": "kv/data/a#b", "field": "k" })),
+            &ex,
+            T,
+        )
+        .unwrap();
+    assert_eq!(got.unwrap(), b"v");
+    assert_eq!(target("kv/data/a#b"), "/v1/kv/data/a%23b");
+    // The display URL stays the raw form.
+    assert_eq!(
+        c.request("kv/data/a#b").unwrap().url,
+        "https://v:8200/v1/kv/data/a#b"
+    );
+}
+
+#[test]
+fn an_addr_that_is_no_url_is_refused_before_any_exchange() {
+    let ex = Canned::status(200, &kv2(json!({ "k": "v" })));
+    let c = VaultClient::new(&cfg("vault.internal:8200"), TOKEN);
+    let e = c
+        .resolve(&settings(json!({ "path": "kv/data/x#k" })), &ex, T)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(e.kind, SecretErrorKind::Unavailable);
+    let url = "vault.internal:8200/v1/kv/data/x";
+    assert!(
+        e.message.starts_with(&format!(
+            "request to Vault ({url}) failed: the request URL is not a valid URL: "
+        )),
+        "{}",
+        e.message
+    );
+    assert!(
+        ex.seen.lock().unwrap().is_empty(),
+        "the exchange is never called"
+    );
+}
+
+/// An `addr` carrying userinfo never prints it: not in a refusal text, not in `Debug`.
+#[test]
+fn addr_userinfo_is_never_printed() {
+    let reference = settings(json!({ "path": "kv/data/x#k" }));
+    for (addr, shown) in [
+        (
+            "https://svc:s3cret@vault:8200",
+            "https://vault:8200/v1/kv/data/x",
+        ),
+        (
+            "https://svc:s3cret@vault:8200/",
+            "https://vault:8200/v1/kv/data/x",
+        ),
+        (
+            "https://a@b:s3cret@vault:8200/p",
+            "https://vault:8200/p/v1/kv/data/x",
+        ),
+        ("svc:s3cret@vault:8200", "vault:8200/v1/kv/data/x"),
+        (
+            "https://vault:8200/p@q",
+            "https://vault:8200/p@q/v1/kv/data/x",
+        ),
+    ] {
+        let c = VaultClient::new(&cfg(addr), TOKEN);
+        let e = c
+            .resolve(&reference, &Canned::status(404, "{}"), T)
+            .unwrap()
+            .unwrap_err();
+        assert!(e.message.contains(shown), "{}", e.message);
+        assert!(!e.message.contains("s3cret"), "{}", e.message);
+        assert!(!format!("{c:?}").contains("s3cret"));
+    }
 }
 
 #[test]

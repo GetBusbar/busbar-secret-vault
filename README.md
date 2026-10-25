@@ -12,7 +12,7 @@ The HashiCorp Vault secret backend as a droppable busbar plugin: a cdylib export
 
 ## What it is for
 
-**This plugin's version: v1.0.0.** (Independently versioned from busbar
+**This plugin's version: v1.6.0.** (Independently versioned from busbar
 itself — see [Versioning](#versioning) below.)
 
 [![CI](https://github.com/GetBusbar/busbar-secret-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/GetBusbar/busbar-secret-vault/actions/workflows/ci.yml)
@@ -34,7 +34,7 @@ compiled in, or `dlopen`'d as a signed cdylib, never a separate process.
 
 ### Versioning
 
-This plugin is versioned **independently of busbar** — `v1.0.0` here says
+This plugin is versioned **independently of busbar** — `v1.6.0` here says
 nothing about which busbar release it is. Compatibility with busbar is
 stated separately: **requires busbar 1.6.0+** (the release that ships the
 secret kind's memory ABI, v2, this crate loads over; 1.6.0 loads no 1.5.x
@@ -122,7 +122,7 @@ the version CI uses. busbar is a pinned git dependency (see
 [Dependencies](#dependencies) below).
 
 ```sh
-cargo build --release      # workspace build; cdylib at target/release/libbusbar_secret_vault_plugin.{so,dylib}
+cargo build --release -p busbar-secret-vault-plugin --features dropped-in   # the dropped-in cdylib: target/release/libbusbar_secret_vault_plugin.{so,dylib}
 cargo test                 # unit tests + the linked/dropped-in conformance test (secret-vault-plugin/tests/conformance.rs)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
@@ -152,9 +152,9 @@ in busbar for the full reference. In short:
 BUSBAR_SIGN_KEY=<signing key> busbar-plugin-pack pack \
     --lib target/release/libbusbar_secret_vault_plugin.so \
     --name busbar-secret-vault --alias vault --kind secret \
-    --version 1.0.0 --publisher busbar \
+    --version 1.6.0 --publisher busbar \
     --license Apache-2.0 \
-    --out busbar-secret-vault-1.0.0-x86_64-linux.tar.gz
+    --out busbar-secret-vault-1.6.0-x86_64-linux.tar.gz
 ```
 
 For local development without a signing key, `busbar-plugin-pack pack
@@ -199,7 +199,7 @@ get`/the Vault UI show), with the field to extract named either as a
 `cargo test` (run at the workspace root) runs:
 
 - `busbar-secret-vault`'s hermetic unit tests: reference parsing, the
-  request it builds, every 1.5.5 response class and its exact text, the
+  request it builds, every 1.5.5 response class and its text (a transport failure appends the host's cause), the
   body cap, a pending exchange, the config refusals, and the door's
   lease map (READY under a lease, zeroed on release, FAILED with its
   `ERROR_KIND_*`, PENDING then resumed). One test reads a real Vault

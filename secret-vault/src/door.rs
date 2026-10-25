@@ -31,6 +31,7 @@ use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::abi::secret::{cancel, ResolveIn, ResolveOut, ERROR_KIND_UNSET};
 use busbar_contract::secret::SecretResult;
+use zeroize::Zeroize;
 
 use crate::{error_kind, parse_config, settings_of, Exchange, Exchanged, Request, VaultClient};
 
@@ -136,25 +137,22 @@ impl<'a> HostExchange<'a> {
     }
 }
 
-/// The path and query of `url` (`/v1/kv/data/x`), the target the framed request names.
-fn path_of(url: &str) -> String {
-    url.parse::<http::Uri>()
-        .ok()
-        .and_then(|u| u.path_and_query().map(|p| p.as_str().to_owned()))
-        .unwrap_or_else(|| "/".to_owned())
+/// The need a request goes over: [`NEED_OPERATOR_CA`] when it names an operator CA, else
+/// [`NEED_PUBLIC`].
+fn need_for(request: &Request) -> u32 {
+    if request.trust_pem.is_some() {
+        NEED_OPERATOR_CA
+    } else {
+        NEED_PUBLIC
+    }
 }
 
 impl Exchange for HostExchange<'_> {
     fn exchange(&self, _ticket: (u32, u32), request: &Request) -> Exchanged {
-        let need = if request.trust_pem.is_some() {
-            NEED_OPERATOR_CA
-        } else {
-            NEED_PUBLIC
-        };
-        let answered = self.op.exchange(need, None, || {
+        let answered = self.op.exchange(need_for(request), None, || {
             Ok(sdk::Request {
                 method: request.method.as_bytes().to_vec(),
-                target: path_of(&request.url).into_bytes(),
+                target: request.target.clone().into_bytes(),
                 fields: request
                     .fields
                     .iter()
@@ -167,15 +165,17 @@ impl Exchange for HostExchange<'_> {
         match answered {
             std::task::Poll::Pending => Exchanged::Pending,
             std::task::Poll::Ready(Err(e)) => Exchanged::Done(Err(e.to_string())),
-            std::task::Poll::Ready(Ok(r)) => {
+            std::task::Poll::Ready(Ok(mut r)) => {
+                // A copy of at most the cap, then the whole reply is wiped: no tail is left behind.
                 let body_len = r.body.len();
-                let mut body = r.body;
-                body.truncate(request.body_cap);
-                Exchanged::Done(Ok(crate::Response {
+                let kept = body_len.min(request.body_cap);
+                let response = crate::Response {
                     status: r.status,
-                    body,
+                    body: r.body[..kept].to_vec(),
                     body_len,
-                }))
+                };
+                r.zeroize();
+                Exchanged::Done(Ok(response))
             }
         }
     }
