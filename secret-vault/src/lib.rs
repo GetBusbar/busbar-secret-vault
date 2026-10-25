@@ -77,8 +77,9 @@ fn default_timeout_secs() -> u64 {
 }
 
 /// The open-time settings — the `secrets.<module>.settings` map, as 1.5.5 read it. `token` is its
-/// secret reference as written (the material arrives through `open`'s secrets, never here).
-#[derive(Debug, Clone, Deserialize)]
+/// secret reference as written (the material arrives through `open`'s secrets, never here). Its
+/// `Debug` prints `addr` without userinfo and never the token reference (which may be a literal).
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VaultConfig {
     /// The Vault server address, e.g. `https://vault.internal:8200`. A trailing slash is tolerated.
@@ -93,6 +94,17 @@ pub struct VaultConfig {
     /// HTTP timeout (connect + total), in seconds. Default 10.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for VaultConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultConfig")
+            .field("addr", &without_userinfo(&self.addr))
+            .field("token", &"<redacted>")
+            .field("ca_cert_pem", &self.ca_cert_pem.is_some())
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 /// Parse the open-time settings bytes, with 1.5.5's refusal texts: an empty (or whitespace-only)
@@ -221,8 +233,9 @@ impl std::fmt::Debug for Request {
     }
 }
 
-/// ONE framed http response, as the exchange answers it. Dropping it zeroizes the body.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// ONE framed http response, as the exchange answers it. Dropping it zeroizes the body; `Debug`
+/// prints its length, never its bytes (the secret material).
+#[derive(Clone, PartialEq, Eq)]
 pub struct Response {
     /// The status code.
     pub status: u16,
@@ -230,6 +243,16 @@ pub struct Response {
     pub body: Vec<u8>,
     /// The body's full length (the short-buffer rule's `needed`); over `body_cap` = too big.
     pub body_len: usize,
+}
+
+impl std::fmt::Debug for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Response")
+            .field("status", &self.status)
+            .field("body", &format_args!("<{} bytes>", self.body.len()))
+            .field("body_len", &self.body_len)
+            .finish()
+    }
 }
 
 impl Drop for Response {
@@ -452,7 +475,7 @@ pub fn judge(
     let body = Zeroizing::new(std::mem::take(&mut resp.body));
 
     if !(200..300).contains(&status) {
-        let excerpt: String = String::from_utf8_lossy(&body).chars().take(300).collect();
+        let excerpt = non_2xx_excerpt(&body);
         return Err(SecretModuleError::internal(format!(
             "Vault returned HTTP {} reading path {vault_path:?} ({url}): {excerpt}",
             status_text(status)
@@ -488,6 +511,30 @@ pub fn judge(
         serde_json::Value::String(s) => Ok(std::mem::take(s).into_bytes()),
         other => Ok(render(other)),
     }
+}
+
+/// The members of a Vault response that carry secret material: a KV read's `data`, a login's
+/// `auth` (its `client_token`), a response-wrapping `wrap_info` (its token).
+const SECRET_MEMBERS: [&str; 3] = ["data", "auth", "wrap_info"];
+
+/// What a non-2xx refusal quotes of the body: its first 300 characters, as 1.5.5 quoted them (Vault's
+/// `{"errors": [...]}` envelope, a proxy's text), UNLESS the body is a JSON object carrying secret
+/// material ([`SECRET_MEMBERS`]): then only its length is said (CREDENTIAL-LOCKDOWN H4).
+fn non_2xx_excerpt(body: &[u8]) -> String {
+    let parsed = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .map(Wiped);
+    let carries_secret = parsed
+        .as_ref()
+        .and_then(|w| w.0.as_object())
+        .is_some_and(|o| SECRET_MEMBERS.iter().any(|m| o.contains_key(*m)));
+    if carries_secret {
+        return format!(
+            "<{} bytes withheld: the body carries secret material>",
+            body.len()
+        );
+    }
+    String::from_utf8_lossy(body).chars().take(300).collect()
 }
 
 /// A parsed response whose string values are zeroized when it is dropped, on every return path.
