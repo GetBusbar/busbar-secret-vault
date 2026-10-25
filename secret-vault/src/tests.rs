@@ -394,7 +394,7 @@ fn every_response_class_answers_1_5_5s_kind_and_text() {
         (
             Canned::status(400, "bad request body"),
             SecretErrorKind::Internal,
-            format!("Vault returned HTTP 400 Bad Request reading path {p} ({URL}): bad request body"),
+            format!("Vault returned HTTP 400 Bad Request reading path {p} ({URL})"),
         ),
         (
             Canned::status(200, "not json"),
@@ -414,9 +414,7 @@ fn every_response_class_answers_1_5_5s_kind_and_text() {
         (
             Canned::status(200, &kv2(json!({ "b": "x", "a": "y" }))),
             SecretErrorKind::NotFound,
-            format!(
-                "Vault secret at path {p} has no field \"api_key\"; available fields: [\"a\", \"b\"]"
-            ),
+            format!("Vault secret at path {p} has no field \"api_key\""),
         ),
     ];
     for (ex, kind, text) in cases {
@@ -425,20 +423,140 @@ fn every_response_class_answers_1_5_5s_kind_and_text() {
     }
 }
 
+/// No text of Vault's reply reaches a refusal (sibling review 2026-10-25, owner rule: no vault reply
+/// text in any error): not a non-2xx body (RED before: its first 300 characters were quoted), not
+/// the names of the fields a secret holds (RED before: "available fields: [..]").
 #[test]
-fn a_non_2xx_excerpt_is_the_first_300_characters() {
-    let long = "é".repeat(400);
+fn no_text_of_the_reply_reaches_a_refusal() {
+    for status in [400, 418, 429] {
+        let e = run(
+            &Canned::status(status, "REPLY-CANARY sk-live-123"),
+            json!({ "path": "kv/data/openai#k" }),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, SecretErrorKind::Internal);
+        assert!(!e.message.contains("REPLY-CANARY"), "{}", e.message);
+        assert!(!e.message.contains("sk-live"), "{}", e.message);
+    }
     let e = run(
-        &Canned::status(418, &long),
+        &Canned::status(200, &kv2(json!({ "FIELD-CANARY": "x" }))),
+        json!({ "path": "kv/data/openai#k" }),
+    )
+    .unwrap_err();
+    assert_eq!(e.kind, SecretErrorKind::NotFound);
+    assert!(!e.message.contains("FIELD-CANARY"), "{}", e.message);
+}
+
+/// A redirect is not followed (the host's exchange follows none): the refusal says so and what to
+/// set, rather than a bare status.
+#[test]
+fn a_redirect_is_refused_saying_it_is_not_followed() {
+    let e = run(
+        &Canned::status(307, "<a href=\"https://active:8200/\">"),
         json!({ "path": "kv/data/openai#k" }),
     )
     .unwrap_err();
     assert_eq!(e.kind, SecretErrorKind::Internal);
-    assert!(e
-        .message
-        .starts_with("Vault returned HTTP 418 I'm a teapot reading path"));
-    assert!(e.message.ends_with(&"é".repeat(300)));
-    assert!(!e.message.ends_with(&"é".repeat(301)));
+    assert!(
+        e.message.ends_with(
+            "a redirect is not followed; set `addr` to the address Vault redirects to (e.g. the \
+             active node)"
+        ),
+        "{}",
+        e.message
+    );
+    assert!(!e.message.contains("active:8200"), "{}", e.message);
+}
+
+/// An EMPTY field is refused INVALID, as every secret source refuses empty material (fail-closed);
+/// RED before: it resolved READY with no material.
+#[test]
+fn an_empty_field_is_refused_never_resolved_empty() {
+    let e = run(
+        &Canned::status(200, &kv2(json!({ "k": "" }))),
+        json!({ "path": "kv/data/openai#k" }),
+    )
+    .unwrap_err();
+    assert_eq!(e.kind, SecretErrorKind::Invalid);
+    assert_eq!(
+        e.message,
+        "Vault secret at path \"kv/data/openai\" field \"k\" is EMPTY; a secret must be \
+         non-empty (fail-closed)"
+    );
+}
+
+/// A reference names `path` (and `field`) and nothing else, and a blank `path` names nothing: both
+/// are refused INVALID before any request (RED before: ignored, and a blank path sent `GET /v1/`).
+#[test]
+fn a_blank_path_or_another_setting_is_refused_before_any_request() {
+    let blank = parse_reference(&settings(json!({ "path": "  ", "field": "k" }))).unwrap_err();
+    assert_eq!(blank.kind, SecretErrorKind::Invalid);
+    assert_eq!(
+        blank.message,
+        "`path` in secret reference settings must not be blank"
+    );
+    let other =
+        parse_reference(&settings(json!({ "path": "kv/data/x#k", "fields": "k" }))).unwrap_err();
+    assert_eq!(other.kind, SecretErrorKind::Invalid);
+    assert_eq!(
+        other.message,
+        "vault secret reference does not take settings.fields; it names only settings.path and \
+         settings.field (fail-closed)"
+    );
+}
+
+/// The open-time settings are judged, not only parsed: an `addr` no request can be built on, a
+/// `ca_cert_pem` with no certificate and a `timeout_secs` of 0 are refused at validate/open/refresh,
+/// naming the key and never quoting the value (RED before: all three opened).
+#[test]
+fn open_time_settings_that_could_never_serve_are_refused_naming_the_key() {
+    let addr = "invalid hashicorp-vault plugin config: `addr` must be an http:// or https:// URL \
+                naming the Vault server (e.g. https://vault.internal:8200), with no query or \
+                fragment";
+    for bad in [
+        "",
+        "vault.internal:8200",
+        "ftp://vault",
+        "https://",
+        "https://v:8200?token=SECRET-CANARY",
+        "https://v:8200#frag",
+    ] {
+        let cfg = json!({ "addr": bad, "token": { "env": "T" } }).to_string();
+        let e = parse_config(cfg.as_bytes()).unwrap_err();
+        assert_eq!(e, addr, "{bad}");
+    }
+    for good in ["http://v", "https://u:p@v:8200/", "https://v:8200/prefix"] {
+        let cfg = json!({ "addr": good, "token": { "env": "T" } }).to_string();
+        assert!(parse_config(cfg.as_bytes()).is_ok(), "{good}");
+    }
+    let cfg = json!({ "addr": "https://v", "token": { "env": "T" }, "ca_cert_pem": "not a pem" });
+    assert_eq!(
+        parse_config(cfg.to_string().as_bytes()).unwrap_err(),
+        "invalid hashicorp-vault plugin config: `ca_cert_pem` holds no PEM certificate \
+         (-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----)"
+    );
+    let cfg = json!({ "addr": "https://v", "token": { "env": "T" }, "timeout_secs": 0 });
+    assert_eq!(
+        parse_config(cfg.to_string().as_bytes()).unwrap_err(),
+        "invalid hashicorp-vault plugin config: `timeout_secs` must be at least 1"
+    );
+}
+
+/// `Debug` of a response never prints its body, and of a config never its token reference or the
+/// address's userinfo (RED before: both were derived).
+#[test]
+fn debug_prints_no_body_token_or_userinfo() {
+    let r = Response {
+        status: 200,
+        body: b"BODY-CANARY".to_vec(),
+        body_len: 11,
+    };
+    assert!(!format!("{r:?}").contains("BODY-CANARY"));
+    let c = parse_config(br#"{"addr":"https://user:PW-CANARY@v","token":{"env":"TOKEN-CANARY"}}"#)
+        .unwrap();
+    let shown = format!("{c:?}");
+    assert!(!shown.contains("PW-CANARY"), "{shown}");
+    assert!(!shown.contains("TOKEN-CANARY"), "{shown}");
 }
 
 #[test]
@@ -594,7 +712,7 @@ fn config_parses_with_1_5_5s_refusals() {
         ("http://v", 3, None)
     );
     assert_eq!(
-        parse_config(br#"{"addr":"a","token":"t"}"#)
+        parse_config(br#"{"addr":"http://a","token":"t"}"#)
             .unwrap()
             .timeout_secs,
         10
@@ -771,14 +889,18 @@ fn a_non_2xx_kv_body_never_reaches_the_refusal() {
             e.message
         );
     }
-    // Vault's own error envelope is still quoted, as 1.5.5 quoted it.
+    // Vault's own error envelope is not quoted either (sibling review 2026-10-25: no text of
+    // Vault's reply reaches a refusal); the status says what happened.
     let e = run(
         &Canned::status(400, r#"{"errors":["permission denied"]}"#),
         json!({ "path": "kv/data/openai#k" }),
     )
     .unwrap_err();
+    assert!(!e.message.contains("permission denied"), "{}", e.message);
     assert!(
-        e.message.ends_with(r#": {"errors":["permission denied"]}"#),
+        e.message
+            .starts_with("Vault returned HTTP 400 Bad Request reading path")
+            && e.message.ends_with(')'),
         "{}",
         e.message
     );

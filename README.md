@@ -87,13 +87,15 @@ AppRole/Kubernetes login flows are a natural future extension of
 
 | Setting | Required | Default | Notes |
 |---|---|---|---|
-| `addr` | yes | — | The Vault server address, e.g. `https://vault.internal:8200` (or `http://127.0.0.1:8200` for a local dev-mode server). |
+| `addr` | yes | — | The Vault server address, e.g. `https://vault.internal:8200` (or `http://127.0.0.1:8200` for a local dev-mode server). It must be an `http://` or `https://` URL naming a host, with no query or fragment; any userinfo is stripped. |
 | `token` | yes | — | The Vault token sent as `X-Vault-Token` on every read. Should be delivered as a secret reference (`{ env: VAULT_TOKEN }`), never a plaintext literal — module-level settings cannot reference another secret plugin, only the built-in `env`/`file` modules. |
-| `ca_cert_pem` | no | — | An additional trusted root CA (PEM), layered on top of the built-in public root store — for a self-hosted Vault behind a private CA. Never disables certificate validation. |
-| `timeout_secs` | no | `10` | HTTP timeout (connect + total), in seconds. |
+| `ca_cert_pem` | no | — | An additional trusted root CA (PEM), layered on top of the built-in public root store — for a self-hosted Vault behind a private CA. Never disables certificate validation. A value holding no `-----BEGIN CERTIFICATE-----` block is refused. |
+| `timeout_secs` | no | `10` | HTTP timeout (connect + total), in seconds; at least 1. |
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
-stray key fails loudly at boot instead of being silently ignored.
+stray key fails loudly at boot instead of being silently ignored. `validate`,
+`open` and `refresh` refuse the same settings, naming the key and never
+quoting its value.
 
 ### Per-reference settings (`{ module: vault, settings: {...} }`)
 
@@ -108,12 +110,16 @@ must name which field to extract, in one of two equivalent forms:
 
 If both are given, the explicit `field` key wins. `path` is used verbatim
 after `{addr}/v1/` — this plugin never prepends a mount or a `data/`
-segment itself.
+segment itself. A blank `path`, and any setting other than `path` and
+`field`, is refused INVALID.
 
 A 404 (no secret at that path), a 403 (bad token / missing Vault
 policy), and a 5xx (Vault itself unhealthy) each surface as a distinct,
 specific error — never collapsed into a generic "resolve failed", and
-never an empty `Ok`.
+never an empty `Ok`: an empty field is refused INVALID. A redirect (3xx)
+is not followed; the refusal says to point `addr` at the address Vault
+redirects to. No refusal quotes Vault's reply (its body, or the names of
+the fields a secret holds), the token or the material.
 
 ## Build
 

@@ -271,8 +271,8 @@ impl Life for Vault {
     }
 }
 
-/// `resolve`: see [`Vault::resolve`]. READY with the material under a lease (none for empty
-/// material), FAILED with its code and text, PENDING while the exchange runs.
+/// `resolve`: see [`Vault::resolve`]. READY with the material under a lease (an empty field is
+/// refused, never resolved empty), FAILED with its code and text, PENDING while the exchange runs.
 pub struct Resolve;
 
 impl SafeSlot for Resolve {

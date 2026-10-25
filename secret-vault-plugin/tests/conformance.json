@@ -5,7 +5,10 @@
     "bad_settings": [
       "",
       { "token": "s.x" },
-      { "addr": "https://localhost:58940", "token": "s.x", "bogus": 1 }
+      { "addr": "https://localhost:58940", "token": "s.x", "bogus": 1 },
+      { "addr": "localhost:58940", "token": "s.x" },
+      { "addr": "https://localhost:58940", "token": "s.x", "timeout_secs": 0 },
+      { "addr": "https://localhost:58940", "token": "s.x", "ca_cert_pem": "not a pem" }
     ],
     "known": { "resolve": { "path": "kv/data/conf#api_key" }, "material": "sk-conformance" },
     "unknown": { "path": "kv/data/absent#api_key" },
