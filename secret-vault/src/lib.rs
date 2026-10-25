@@ -79,7 +79,8 @@ fn default_timeout_secs() -> u64 {
 }
 
 /// The open-time settings — the `secrets.<module>.settings` map, as 1.5.5 read it. `token` is its
-/// secret reference as written (the material arrives through `open`'s secrets, never here).
+/// secret reference as written (the material arrives through `open`'s secrets, never here). Its
+/// `Debug` prints `addr` without userinfo and never the token reference (which may be a literal).
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VaultConfig {
@@ -97,14 +98,14 @@ pub struct VaultConfig {
     pub timeout_secs: u64,
 }
 
-/// `Debug` prints the address without its userinfo and never the token's reference or the CA.
 impl std::fmt::Debug for VaultConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VaultConfig")
             .field("addr", &without_userinfo(&self.addr))
+            .field("token", &"<redacted>")
             .field("ca_cert_pem", &self.ca_cert_pem.is_some())
             .field("timeout_secs", &self.timeout_secs)
-            .finish_non_exhaustive()
+            .finish()
     }
 }
 
@@ -306,18 +307,19 @@ pub struct Response {
     pub body_len: usize,
 }
 
-impl Drop for Response {
-    fn drop(&mut self) {
-        self.body.zeroize();
-    }
-}
-
 impl std::fmt::Debug for Response {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Response")
             .field("status", &self.status)
+            .field("body", &format_args!("<{} bytes>", self.body.len()))
             .field("body_len", &self.body_len)
-            .finish_non_exhaustive()
+            .finish()
+    }
+}
+
+impl Drop for Response {
+    fn drop(&mut self) {
+        self.body.zeroize();
     }
 }
 

@@ -858,3 +858,82 @@ fn settings_of_reads_an_object_and_refuses_anything_else() {
         SecretErrorKind::Invalid
     );
 }
+
+// ── Credential-echo canaries (CREDENTIAL-LOCKDOWN H4, A.3) ──────────────────────────────────────
+
+const CANARY: &str = "CANARY3b90e4";
+
+/// H4: a non-2xx answer whose body is a KV payload (a proxy or a standby answering a read with a
+/// status Vault does not use for success) carried sibling secret values into the refusal excerpt.
+#[test]
+fn a_non_2xx_kv_body_never_reaches_the_refusal() {
+    for body in [
+        format!(r#"{{"data":{{"data":{{"api_key":"{CANARY}","other":"x"}}}}}}"#),
+        format!(r#"{{"auth":{{"client_token":"{CANARY}"}}}}"#),
+        format!(r#"{{"wrap_info":{{"token":"{CANARY}"}}}}"#),
+    ] {
+        let e = run(
+            &Canned::status(412, &body),
+            json!({ "path": "kv/data/openai#k" }),
+        )
+        .unwrap_err();
+        assert!(
+            !e.message.contains(CANARY),
+            "the refusal carried a secret: {}",
+            e.message
+        );
+        assert!(
+            e.message
+                .starts_with("Vault returned HTTP 412 Precondition Failed reading path"),
+            "{}",
+            e.message
+        );
+    }
+    // Vault's own error envelope is not quoted either (sibling review 2026-10-25: no text of
+    // Vault's reply reaches a refusal); the status says what happened.
+    let e = run(
+        &Canned::status(400, r#"{"errors":["permission denied"]}"#),
+        json!({ "path": "kv/data/openai#k" }),
+    )
+    .unwrap_err();
+    assert!(!e.message.contains("permission denied"), "{}", e.message);
+    assert!(
+        e.message
+            .ends_with("(https://vault.internal:8200/v1/kv/data/openai)")
+            || e.message.ends_with(')'),
+        "{}",
+        e.message
+    );
+}
+
+/// A.3: `Response`'s `Debug` printed its body (the secret material), and `VaultConfig`'s printed
+/// the `addr` userinfo and the token reference as written.
+#[test]
+fn debug_of_a_response_or_the_config_carries_no_secret() {
+    let r = Response {
+        status: 200,
+        body: format!(r#"{{"data":{{"data":{{"k":"{CANARY}"}}}}}}"#).into_bytes(),
+        body_len: 40,
+    };
+    let c = parse_config(
+        format!(r#"{{"addr":"https://svc:{CANARY}@vault:8200","token":"{CANARY}"}}"#).as_bytes(),
+    )
+    .unwrap();
+    // `Vec<u8>`'s `Debug` prints the bytes as numbers: look for those too.
+    let as_bytes = format!("{:?}", CANARY.as_bytes());
+    let as_bytes = &as_bytes[1..as_bytes.len() - 1];
+    for text in [
+        format!("{r:?}"),
+        format!("{r:#?}"),
+        format!("{c:?}"),
+        format!("{c:#?}"),
+    ] {
+        let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(!text.contains(CANARY), "Debug carried a secret: {text}");
+        assert!(
+            !flat.contains(as_bytes),
+            "Debug carried a secret's bytes: {text}"
+        );
+    }
+    assert!(format!("{c:?}").contains("vault:8200"));
+}
