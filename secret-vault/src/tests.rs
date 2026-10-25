@@ -899,8 +899,8 @@ fn a_non_2xx_kv_body_never_reaches_the_refusal() {
     assert!(!e.message.contains("permission denied"), "{}", e.message);
     assert!(
         e.message
-            .ends_with("(https://vault.internal:8200/v1/kv/data/openai)")
-            || e.message.ends_with(')'),
+            .starts_with("Vault returned HTTP 400 Bad Request reading path")
+            && e.message.ends_with(')'),
         "{}",
         e.message
     );
