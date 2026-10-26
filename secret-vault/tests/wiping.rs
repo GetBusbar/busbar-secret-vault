@@ -2,7 +2,9 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Every heap block the plugin frees while it resolves a reference must have been wiped first: the
-//! token's copy in the request, the response body, and the parsed JSON tree. This test binary
+//! token's copy in the request, the response body, the parsed JSON tree, and the resolved value
+//! itself once its answer drops (the credential chip, row 6: host-owned secret bytes; the value is
+//! held in a zeroizing holder until the SDK writes it into the host's buffer). This test binary
 //! installs a global allocator whose `dealloc` scans the block being freed for two canaries (the
 //! token and a secret value) and records whether it saw either. It is its own binary so the crate's
 //! `forbid(unsafe_code)` does not apply to the allocator wrapper.
@@ -17,7 +19,6 @@ use std::sync::Mutex;
 use busbar_secret_vault::{
     parse_config, Exchange, Exchanged, Request, Response, VaultClient, MAX_VAULT_RESPONSE_BYTES,
 };
-use zeroize::Zeroizing;
 
 const TOKEN: &[u8] = b"s.CANARY-TOKEN-7f3a";
 const VALUE: &[u8] = b"CANARY-VALUE-91c2";
@@ -99,13 +100,14 @@ fn nothing_the_plugin_frees_still_holds_the_token_or_the_value() {
 
     {
         let client = VaultClient::new(&cfg, TOKEN);
-        let material = Zeroizing::new(
-            client
-                .resolve(&settings, &exchange, (1, 1))
-                .expect("the exchange does not pend")
-                .expect("a 200 with the field"),
-        );
-        assert_eq!(material.as_slice(), VALUE);
+        // The plugin's answer, dropped as the door drops it: nothing here wipes it on the
+        // plugin's behalf. RED while `resolve` answered a plain `Vec<u8>`.
+        let material = client
+            .resolve(&settings, &exchange, (1, 1))
+            .expect("the exchange does not pend")
+            .expect("a 200 with the field");
+        assert_eq!(material.len(), VALUE.len());
+        drop(material);
     }
 
     assert!(

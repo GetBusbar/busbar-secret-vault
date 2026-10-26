@@ -1,5 +1,6 @@
 {
   "settings": { "addr": "https://localhost:58940", "token": "s.conformance-token", "timeout_secs": 5 },
+  "credentials": ["s.conformance-token", "sk-conformance"],
   "dialing_steps": ["resolve known", "resolve known again", "resolve unknown", "resolve after refresh"],
   "secret": {
     "bad_settings": [

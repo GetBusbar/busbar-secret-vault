@@ -49,9 +49,16 @@
 //! with its `abi::secret::ERROR_KIND_*`. No refusal carries the token, the material or any text of
 //! Vault's reply (its body, or the names of the fields it holds); an empty field is refused, never
 //! resolved empty.
+//!
+//! ## The value (the credential chip, row 6: host-owned secret bytes)
+//!
+//! A resolved value is moved out of Vault's reply into a zeroizing [`Held`] (no getter), never
+//! copied, and leaves it only through the SDK's `resolve` answer, into the host's buffer
+//! ([`door`]); no lease is granted and no copy is left behind.
 
 #![forbid(unsafe_code)]
 
+use busbar_contract::abi::sdk::cred::Held;
 use busbar_contract::abi::secret::{
     ERROR_KIND_DENIED, ERROR_KIND_INTERNAL, ERROR_KIND_INVALID, ERROR_KIND_NOT_FOUND,
     ERROR_KIND_UNAVAILABLE,
@@ -418,7 +425,7 @@ impl VaultClient {
         settings: &serde_json::Map<String, serde_json::Value>,
         exchange: &dyn Exchange,
         ticket: (u32, u32),
-    ) -> Option<SecretResult<Vec<u8>>> {
+    ) -> Option<SecretResult<Held<Vec<u8>>>> {
         let (path, field) = match parse_reference(settings) {
             Ok(r) => r,
             Err(e) => return Some(Err(e)),
@@ -486,7 +493,8 @@ fn status_text(status: u16) -> String {
 ///
 /// The copies of the material this holds are wiped when released: the response body (taken into a
 /// `Zeroizing` buffer), the parsed JSON tree (every string value, on every return path) and the
-/// rendering of a non-string value; the selected string is moved out of the tree, not cloned.
+/// rendering of a non-string value; the selected string is moved out of the tree, not cloned, into
+/// the zeroizing [`Held`] the answer is.
 /// Residual (safe code cannot reach either): `serde_json`'s private scratch buffer for strings
 /// that contain JSON escapes, and the strings it had built when a body fails to parse partway.
 ///
@@ -497,7 +505,7 @@ pub fn judge(
     field: &str,
     url: &str,
     result: Result<Response, String>,
-) -> SecretResult<Vec<u8>> {
+) -> SecretResult<Held<Vec<u8>>> {
     let mut resp = result.map_err(|cause| {
         let cause = cause.trim();
         let tail = if cause.is_empty() {
@@ -579,8 +587,8 @@ pub fn judge(
             "Vault secret at path {vault_path:?} field {field:?} is EMPTY; a secret must be \
              non-empty (fail-closed)"
         ))),
-        serde_json::Value::String(s) => Ok(std::mem::take(s).into_bytes()),
-        other => Ok(render(other)),
+        serde_json::Value::String(s) => Ok(Held::new(std::mem::take(s).into_bytes())),
+        other => Ok(Held::new(render(other))),
     }
 }
 

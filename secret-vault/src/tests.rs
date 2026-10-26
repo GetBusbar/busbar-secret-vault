@@ -154,7 +154,7 @@ fn roundtrip_against_live_vault() {
         .resolve(&hash_settings, &ex, T)
         .unwrap()
         .expect("resolve api_key");
-    assert_eq!(got, b"sk-live-abc123");
+    assert!(got == Held::new(b"sk-live-abc123".to_vec()));
 
     // Explicit `field` key addressing the SECOND field in the same entry.
     let explicit_settings =
@@ -163,11 +163,15 @@ fn roundtrip_against_live_vault() {
         .resolve(&explicit_settings, &ex, T)
         .unwrap()
         .expect("resolve org_id");
-    assert_eq!(got, b"org-xyz");
+    assert!(got == Held::new(b"org-xyz".to_vec()));
 
     // A wrong path is a distinct, loud 404 — never an empty Ok.
     let missing = settings(json!({ "path": "secret/data/no-such-secret#x" }));
-    let err = module.resolve(&missing, &ex, T).unwrap().unwrap_err();
+    let err = module
+        .resolve(&missing, &ex, T)
+        .unwrap()
+        .err()
+        .expect("refused");
     assert_eq!(err.kind, SecretErrorKind::NotFound);
     assert!(
         err.message.contains("404"),
@@ -177,7 +181,11 @@ fn roundtrip_against_live_vault() {
 
     // A wrong field on a REAL path is also a distinct, loud error naming the field.
     let bad_field = settings(json!({ "path": "secret/data/busbar-test#no_such_field" }));
-    let err = module.resolve(&bad_field, &ex, T).unwrap().unwrap_err();
+    let err = module
+        .resolve(&bad_field, &ex, T)
+        .unwrap()
+        .err()
+        .expect("refused");
     assert_eq!(err.kind, SecretErrorKind::NotFound);
     assert!(
         err.message.contains("no_such_field"),
@@ -187,7 +195,11 @@ fn roundtrip_against_live_vault() {
 
     // A bad token is a distinct, loud 403 — never conflated with the 404 path.
     let bad = VaultClient::new(&cfg(&addr), b"not-a-real-token");
-    let err = bad.resolve(&hash_settings, &ex, T).unwrap().unwrap_err();
+    let err = bad
+        .resolve(&hash_settings, &ex, T)
+        .unwrap()
+        .err()
+        .expect("refused");
     assert_eq!(err.kind, SecretErrorKind::Denied);
     assert!(
         err.message.contains("403"),
@@ -280,7 +292,7 @@ impl Exchange for Canned {
 const ADDR: &str = "http://vault.internal:8200/";
 const URL: &str = "http://vault.internal:8200/v1/kv/data/openai";
 
-fn run(ex: &dyn Exchange, reference: serde_json::Value) -> SecretResult<Vec<u8>> {
+fn run(ex: &dyn Exchange, reference: serde_json::Value) -> SecretResult<Held<Vec<u8>>> {
     let r = VaultClient::new(&cfg(ADDR), TOKEN)
         .resolve(&settings(reference), ex, T)
         .expect("a canned exchange never pends");
@@ -325,17 +337,17 @@ fn a_field_is_read_as_its_string_bytes_or_its_json_text() {
         200,
         &kv2(json!({ "api_key": "sk-1", "n": 7, "o": { "a": true } })),
     );
-    assert_eq!(
-        run(&ex, json!({ "path": "kv/data/openai#api_key" })).unwrap(),
-        b"sk-1"
+    assert!(
+        run(&ex, json!({ "path": "kv/data/openai#api_key" })).unwrap()
+            == Held::new(b"sk-1".to_vec())
     );
-    assert_eq!(
-        run(&ex, json!({ "path": "kv/data/openai", "field": "n" })).unwrap(),
-        b"7"
+    assert!(
+        run(&ex, json!({ "path": "kv/data/openai", "field": "n" })).unwrap()
+            == Held::new(b"7".to_vec())
     );
-    assert_eq!(
-        run(&ex, json!({ "path": "kv/data/openai#o" })).unwrap(),
-        br#"{"a":true}"#
+    assert!(
+        run(&ex, json!({ "path": "kv/data/openai#o" })).unwrap()
+            == Held::new(br#"{"a":true}"#.to_vec())
     );
     assert_eq!(ex.seen.lock().unwrap()[0], format!("GET {URL}"));
 }
@@ -343,7 +355,9 @@ fn a_field_is_read_as_its_string_bytes_or_its_json_text() {
 #[test]
 fn a_malformed_reference_is_refused_before_any_exchange() {
     let ex = Canned::status(200, "{}");
-    let e = run(&ex, json!({ "path": "kv/data/openai" })).unwrap_err();
+    let e = run(&ex, json!({ "path": "kv/data/openai" }))
+        .err()
+        .expect("refused");
     assert_eq!(e.kind, SecretErrorKind::Invalid);
     assert!(ex.seen.lock().unwrap().is_empty());
 }
@@ -418,7 +432,9 @@ fn every_response_class_answers_1_5_5s_kind_and_text() {
         ),
     ];
     for (ex, kind, text) in cases {
-        let e = run(&ex, json!({ "path": "kv/data/openai#api_key" })).unwrap_err();
+        let e = run(&ex, json!({ "path": "kv/data/openai#api_key" }))
+            .err()
+            .expect("refused");
         assert_eq!((e.kind, e.message.as_str()), (kind, text.as_str()));
     }
 }
@@ -433,7 +449,8 @@ fn no_text_of_the_reply_reaches_a_refusal() {
             &Canned::status(status, "REPLY-CANARY sk-live-123"),
             json!({ "path": "kv/data/openai#k" }),
         )
-        .unwrap_err();
+        .err()
+        .expect("refused");
         assert_eq!(e.kind, SecretErrorKind::Internal);
         assert!(!e.message.contains("REPLY-CANARY"), "{}", e.message);
         assert!(!e.message.contains("sk-live"), "{}", e.message);
@@ -442,7 +459,8 @@ fn no_text_of_the_reply_reaches_a_refusal() {
         &Canned::status(200, &kv2(json!({ "FIELD-CANARY": "x" }))),
         json!({ "path": "kv/data/openai#k" }),
     )
-    .unwrap_err();
+    .err()
+    .expect("refused");
     assert_eq!(e.kind, SecretErrorKind::NotFound);
     assert!(!e.message.contains("FIELD-CANARY"), "{}", e.message);
 }
@@ -455,7 +473,8 @@ fn a_redirect_is_refused_saying_it_is_not_followed() {
         &Canned::status(307, "<a href=\"https://active:8200/\">"),
         json!({ "path": "kv/data/openai#k" }),
     )
-    .unwrap_err();
+    .err()
+    .expect("refused");
     assert_eq!(e.kind, SecretErrorKind::Internal);
     assert!(
         e.message.ends_with(
@@ -476,7 +495,8 @@ fn an_empty_field_is_refused_never_resolved_empty() {
         &Canned::status(200, &kv2(json!({ "k": "" }))),
         json!({ "path": "kv/data/openai#k" }),
     )
-    .unwrap_err();
+    .err()
+    .expect("refused");
     assert_eq!(e.kind, SecretErrorKind::Invalid);
     assert_eq!(
         e.message,
@@ -567,7 +587,9 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
         body: vec![b' '; cap + 1],
         body_len: cap + 1,
     }));
-    let e = run(&over, json!({ "path": "kv/data/openai#k" })).unwrap_err();
+    let e = run(&over, json!({ "path": "kv/data/openai#k" }))
+        .err()
+        .expect("refused");
     assert_eq!(e.kind, SecretErrorKind::Unavailable);
     assert_eq!(
         e.message,
@@ -581,7 +603,8 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
     }));
     assert_eq!(
         run(&reported, json!({ "path": "kv/data/openai#k" }))
-            .unwrap_err()
+            .err()
+            .expect("refused")
             .kind,
         SecretErrorKind::Unavailable
     );
@@ -593,10 +616,7 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
         body_len: at.len(),
         body: at,
     }));
-    assert_eq!(
-        run(&at, json!({ "path": "kv/data/openai#k" })).unwrap(),
-        b"v"
-    );
+    assert!(run(&at, json!({ "path": "kv/data/openai#k" })).unwrap() == Held::new(b"v".to_vec()));
     // 1.5.5 classifies 404/403/5xx before it reads the body: an oversize 404 is still a 404.
     let big404 = Canned::of(Ok(Response {
         status: 404,
@@ -605,7 +625,8 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
     }));
     assert_eq!(
         run(&big404, json!({ "path": "kv/data/openai#k" }))
-            .unwrap_err()
+            .err()
+            .expect("refused")
             .kind,
         SecretErrorKind::NotFound
     );
@@ -625,7 +646,7 @@ fn the_body_cap_is_judged_before_any_other_non_2xx() {
     };
     let reference = || json!({ "path": "kv/data/openai#k" });
     for status in [400, 418] {
-        let e = run(&over(status), reference()).unwrap_err();
+        let e = run(&over(status), reference()).err().expect("refused");
         assert_eq!(e.kind, SecretErrorKind::Unavailable, "{status}");
         assert_eq!(
             e.message,
@@ -635,9 +656,9 @@ fn the_body_cap_is_judged_before_any_other_non_2xx() {
             "{status}"
         );
     }
-    let e = run(&over(403), reference()).unwrap_err();
+    let e = run(&over(403), reference()).err().expect("refused");
     assert_eq!(e.kind, SecretErrorKind::Denied);
-    let e = run(&over(503), reference()).unwrap_err();
+    let e = run(&over(503), reference()).err().expect("refused");
     assert_eq!(e.kind, SecretErrorKind::Unavailable);
     assert!(
         e.message.starts_with("Vault server error reading path"),
@@ -676,7 +697,7 @@ fn a_pending_exchange_pends_the_resolve_then_answers_on_resume() {
     let c = VaultClient::new(&cfg(ADDR), TOKEN);
     let s = settings(json!({ "path": "kv/data/openai#k" }));
     assert!(c.resolve(&s, &ex, T).is_none(), "pending");
-    assert_eq!(c.resolve(&s, &ex, T).unwrap().unwrap(), b"late");
+    assert!(c.resolve(&s, &ex, T).unwrap().unwrap() == Held::new(b"late".to_vec()));
 }
 
 #[test]
@@ -764,7 +785,7 @@ fn the_framed_target_percent_encodes_what_a_uri_cannot_hold() {
             T,
         )
         .unwrap();
-    assert_eq!(got.unwrap(), b"v");
+    assert!(got.unwrap() == Held::new(b"v".to_vec()));
     assert_eq!(target("kv/data/a#b"), "/v1/kv/data/a%23b");
     // The display URL stays the raw form.
     assert_eq!(
@@ -780,7 +801,8 @@ fn an_addr_that_is_no_url_is_refused_before_any_exchange() {
     let e = c
         .resolve(&settings(json!({ "path": "kv/data/x#k" })), &ex, T)
         .unwrap()
-        .unwrap_err();
+        .err()
+        .expect("refused");
     assert_eq!(e.kind, SecretErrorKind::Unavailable);
     let url = "vault.internal:8200/v1/kv/data/x";
     assert!(
@@ -823,7 +845,8 @@ fn addr_userinfo_is_never_printed() {
         let e = c
             .resolve(&reference, &Canned::status(404, "{}"), T)
             .unwrap()
-            .unwrap_err();
+            .err()
+            .expect("refused");
         assert!(e.message.contains(shown), "{}", e.message);
         assert!(!e.message.contains("s3cret"), "{}", e.message);
         assert!(!format!("{c:?}").contains("s3cret"));
@@ -876,7 +899,8 @@ fn a_non_2xx_kv_body_never_reaches_the_refusal() {
             &Canned::status(412, &body),
             json!({ "path": "kv/data/openai#k" }),
         )
-        .unwrap_err();
+        .err()
+        .expect("refused");
         assert!(
             !e.message.contains(CANARY),
             "the refusal carried a secret: {}",
@@ -895,7 +919,8 @@ fn a_non_2xx_kv_body_never_reaches_the_refusal() {
         &Canned::status(400, r#"{"errors":["permission denied"]}"#),
         json!({ "path": "kv/data/openai#k" }),
     )
-    .unwrap_err();
+    .err()
+    .expect("refused");
     assert!(!e.message.contains("permission denied"), "{}", e.message);
     assert!(
         e.message

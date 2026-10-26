@@ -10,9 +10,10 @@
 //!   reference, so the kernel resolves it and lends the material in `OpenIn::secrets[0]`.
 //! * `refresh` — a reload's new settings and re-resolved token replace the client; a refusal keeps
 //!   the running one.
-//! * `resolve` — a reference to its field's material, READY under a lease (the SDK's [`Held`]
-//!   leases, zeroed on release), FAILED with its `ERROR_KIND_*` and 1.5.5's text, or PENDING while
-//!   the host's exchange runs.
+//! * `resolve` — a reference to its field's material, written by the SDK ([`resolved`]) into the
+//!   host's zeroed buffer and wiped here (the credential chip, row 6: host-owned secret bytes; no
+//!   lease, no copy left behind), FAILED with its `ERROR_KIND_*` and 1.5.5's text, or PENDING while
+//!   the host's exchange runs. A value over the host's buffer is the short-buffer answer.
 //! * `release`, `close`, `cancel`, `tick`, `retire`, `drive` — the SDK's: a KV v2 read carries no
 //!   Vault lease to renew.
 
@@ -21,15 +22,16 @@ use std::sync::{Arc, PoisonError, RwLock};
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, BLOB_OCTETS};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome};
 use busbar_contract::abi::mechanism::door::Statement;
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::Host;
+use busbar_contract::abi::sdk::cred::{self, resolved};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{self as sdk, Op};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
-use busbar_contract::abi::secret::{cancel, ResolveIn, ResolveOut, ERROR_KIND_UNSET};
+use busbar_contract::abi::secret::{cancel, ResolveIn, ResolveOut};
 use busbar_contract::secret::SecretResult;
 use zeroize::Zeroize;
 
@@ -222,7 +224,11 @@ impl Vault {
 
     /// `resolve` for the op on `ticket`, over its settings bytes: `None` while the exchange is
     /// pending.
-    pub fn resolve(&self, ticket: Ticket, settings: &[u8]) -> Option<SecretResult<Vec<u8>>> {
+    pub fn resolve(
+        &self,
+        ticket: Ticket,
+        settings: &[u8],
+    ) -> Option<SecretResult<cred::Held<Vec<u8>>>> {
         match &self.exchange {
             Some(exchange) => self.resolve_over(exchange.as_ref(), ticket, settings),
             None => Some(Err(busbar_contract::secret::SecretModuleError::new(
@@ -238,7 +244,7 @@ impl Vault {
         exchange: &dyn Exchange,
         ticket: Ticket,
         settings: &[u8],
-    ) -> Option<SecretResult<Vec<u8>>> {
+    ) -> Option<SecretResult<cred::Held<Vec<u8>>>> {
         match settings_of(settings) {
             Err(e) => Some(Err(e)),
             Ok(s) => self
@@ -271,8 +277,8 @@ impl Life for Vault {
     }
 }
 
-/// `resolve`: see [`Vault::resolve`]. READY with the material under a lease (an empty field is
-/// refused, never resolved empty), FAILED with its code and text, PENDING while the exchange runs.
+/// `resolve`: see [`Vault::resolve`]. READY with the material in the host's buffer (an empty field
+/// is refused, never resolved empty), FAILED with its code and text, PENDING while the exchange runs.
 pub struct Resolve;
 
 impl SafeSlot for Resolve {
@@ -297,11 +303,7 @@ impl SafeSlot for Resolve {
         };
         match answered {
             None => Outcome::Pending,
-            Some(Ok(material)) => {
-                out.lease_secret(|o| &o.secret, held.leases(), material, BLOB_OCTETS);
-                out.set(|o| &o.error_kind, ERROR_KIND_UNSET);
-                Outcome::Ready
-            }
+            Some(Ok(material)) => resolved(input, &mut out, material),
             Some(Err(e)) => {
                 out.set(|o| &o.error_kind, error_kind(e.kind));
                 out.fail(Refusal::failed(e.message))

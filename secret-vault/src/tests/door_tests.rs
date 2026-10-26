@@ -3,9 +3,9 @@
 
 //! The door's instance: a resolve answers the material, FAILED with its kind, or PENDING while the
 //! exchange runs; `open`/`refresh` take the token from the lent secrets; the Statement names the
-//! token as its one secret reference. What the slots write (the lease, the secret flag, the error
-//! kind and text) is held over the real loader, linked and dropped in, in the plugin crate's
-//! `tests/conformance.rs`.
+//! token as its one secret reference. What the slots write (the value, into the host's buffer under
+//! no lease; the secret flag; the error kind and text) is held over the real loader, linked and
+//! dropped in, in the plugin crate's `tests/conformance.rs`.
 
 use super::*;
 use busbar_contract::abi::secret::{ERROR_KIND_DENIED, ERROR_KIND_INVALID, ERROR_KIND_UNAVAILABLE};
@@ -63,17 +63,21 @@ fn reference() -> Vec<u8> {
 #[test]
 fn a_read_answers_the_material() {
     let v = vault(200, OK_BODY, 0);
-    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert!(v.resolve(T, &reference()).unwrap().unwrap() == cred::Held::new(b"material".to_vec()));
 }
 
 #[test]
 fn a_refusal_answers_its_kind() {
     let v = vault(403, "denied", 0);
-    let e = v.resolve(T, &reference()).unwrap().unwrap_err();
+    let e = v.resolve(T, &reference()).unwrap().err().expect("refused");
     assert_eq!(error_kind(e.kind), ERROR_KIND_DENIED);
     assert!(!e.message.is_empty(), "a refusal names its reason");
 
-    let e = v.resolve(T, b"[not an object]").unwrap().unwrap_err();
+    let e = v
+        .resolve(T, b"[not an object]")
+        .unwrap()
+        .err()
+        .expect("refused");
     assert_eq!(e.kind, SecretErrorKind::Invalid);
     assert_eq!(error_kind(e.kind), ERROR_KIND_INVALID);
 }
@@ -82,13 +86,13 @@ fn a_refusal_answers_its_kind() {
 fn a_pending_exchange_pends_the_op_and_the_resume_answers() {
     let v = vault(200, OK_BODY, 1);
     assert!(v.resolve(T, &reference()).is_none(), "pending");
-    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert!(v.resolve(T, &reference()).unwrap().unwrap() == cred::Held::new(b"material".to_vec()));
 }
 
 #[test]
 fn the_host_exchange_names_the_missing_http_exchange() {
     let v = Vault::open(SETTINGS, &[&b"tok"[..]], 1).expect("opens");
-    let e = v.resolve(T, &reference()).unwrap().unwrap_err();
+    let e = v.resolve(T, &reference()).unwrap().err().expect("refused");
     assert_eq!(error_kind(e.kind), ERROR_KIND_UNAVAILABLE);
 }
 
@@ -152,9 +156,9 @@ fn a_refresh_swaps_the_client_and_a_refused_refresh_keeps_it() {
         }),
     );
     assert!(v.refresh(SETTINGS, &[&b"tok2"[..]], 2).is_ok());
-    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert!(v.resolve(T, &reference()).unwrap().unwrap() == cred::Held::new(b"material".to_vec()));
     assert!(v.refresh(b"{}", &[&b"tok3"[..]], 3).is_err());
-    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert!(v.resolve(T, &reference()).unwrap().unwrap() == cred::Held::new(b"material".to_vec()));
     assert_eq!(
         *tokens.lock().unwrap(),
         vec![b"tok2".to_vec(), b"tok2".to_vec()]

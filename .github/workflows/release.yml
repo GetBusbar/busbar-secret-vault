@@ -28,7 +28,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@71b70e487bebe5ae2feb1fabf32d8906edf4ccad
+    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@1b5b47525d9c13e6ea823cae17c2723b156713be
     with:
       plugin_crate: busbar-secret-vault-plugin
       manifest_name: busbar-secret-vault
@@ -50,7 +50,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@71b70e487bebe5ae2feb1fabf32d8906edf4ccad
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@1b5b47525d9c13e6ea823cae17c2723b156713be
     with:
       version: ${{ github.ref_name }}
       asset_prefix: busbar-secret-vault
