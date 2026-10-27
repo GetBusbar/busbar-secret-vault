@@ -68,7 +68,7 @@ fn host(
     conformance_host::host(wake, anchors)
 }
 
-busbar_plugin_loader::conformance_suite! {
+busbar_test_kit::conformance_suite! {
     door: busbar_secret_vault::door::door,
     cdylib: "busbar_secret_vault_plugin",
     inputs: include_str!("conformance.json"),
