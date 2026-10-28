@@ -3,7 +3,7 @@
 
 //! The Vault secret module as a droppable `kind: secret` plugin: the logic crate re-exported whole,
 //! and its door (`busbar_secret_vault::door::door`) exported as this image's ONE symbol,
-//! `busbar_plugin_door` (`export_door!`, THE DESIGN §11.4). The logic crate is
+//! `busbar_plugin_door` (`export_door!`). The logic crate is
 //! `#![forbid(unsafe_code)]` and exports nothing, so a build that links it carries no door symbol.
 //!
 //! This crate is `deny`, not `forbid`: the export macro's `#[unsafe(no_mangle)]` is the one

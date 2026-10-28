@@ -5,13 +5,13 @@
 //! lifecycle slots the SDK's generic lifecycle (`lifecycle: life(Vault)`, [`Life`]) and `resolve` a
 //! [`SafeSlot`] — no `unsafe` in this crate.
 //!
-//! * `validate` — the settings parse as 1.5.5's open-time config, refusing with its texts.
+//! * `validate` — the settings parse as the open-time config, refusing with its texts.
 //! * `open` — the same parse, plus the token: the Statement names `token` as its one secret
 //!   reference, so the kernel resolves it and lends the material in `OpenIn::secrets[0]`.
 //! * `refresh` — a reload's new settings and re-resolved token replace the client; a refusal keeps
 //!   the running one.
 //! * `resolve` — a reference to its field's material, READY under a lease (the SDK's [`Held`]
-//!   leases, zeroed on release), FAILED with its `ERROR_KIND_*` and 1.5.5's text, or PENDING while
+//!   leases, zeroed on release), FAILED with its `ERROR_KIND_*` and its text, or PENDING while
 //!   the host's exchange runs.
 //! * `release`, `close`, `cancel`, `tick`, `retire`, `drive` — the SDK's: a KV v2 read carries no
 //!   Vault lease to renew.
@@ -46,7 +46,7 @@ const NONE: AbiStr = AbiStr {
 /// The config path the target comes from: the `addr` setting (the host resolves it at `open` and
 /// `refresh` and pins every exchange of the need to it).
 const TARGET_FROM: &str = "settings.addr";
-/// The config path the operator CA comes from (1.5.5's `ca_cert_pem`): added on top of the public
+/// The config path the operator CA comes from (`ca_cert_pem`): added on top of the public
 /// roots by the host's TLS, never handed to this plugin.
 const TRUST_FROM: &str = "settings.ca_cert_pem";
 
