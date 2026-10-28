@@ -8,7 +8,7 @@
 //! `tests/conformance.rs`.
 
 use super::*;
-use busbar_contract::abi::secret::{ERROR_KIND_DENIED, ERROR_KIND_INVALID, ERROR_KIND_UNAVAILABLE};
+use busbar_contract::abi::secret::{ERROR_KIND_DENIED, ERROR_KIND_INVALID};
 use busbar_contract::secret::SecretErrorKind;
 use serde_json::json;
 use std::sync::Mutex;
@@ -42,16 +42,36 @@ impl Exchange for Scripted {
 
 const SETTINGS: &[u8] = br#"{"addr":"http://v:8200","token":{"env":"T"}}"#;
 
-fn vault(status: u16, body: &str, pends: u32) -> Vault {
+/// A vault and the exchange a test stands in for the host's (prod resolves only through the op's
+/// [`HostExchange`]).
+struct Rig<E> {
+    vault: Vault,
+    exchange: E,
+}
+
+impl<E: Exchange> Rig<E> {
+    fn resolve(&self, ticket: Ticket, settings: &[u8]) -> Option<SecretResult<Vec<u8>>> {
+        self.vault.resolve(&self.exchange, ticket, settings)
+    }
+}
+
+impl<E> std::ops::Deref for Rig<E> {
+    type Target = Vault;
+    fn deref(&self) -> &Vault {
+        &self.vault
+    }
+}
+
+fn vault(status: u16, body: &str, pends: u32) -> Rig<Scripted> {
     let cfg = crate::parse_config(SETTINGS).unwrap();
-    Vault::new(
-        VaultClient::new(&cfg, b"tok"),
-        Box::new(Scripted {
+    Rig {
+        vault: Vault::new(VaultClient::new(&cfg, b"tok")),
+        exchange: Scripted {
             status,
             body: body.into(),
             pends: Mutex::new(pends),
-        }),
-    )
+        },
+    }
 }
 
 const OK_BODY: &str = r#"{"data":{"data":{"k":"material"}}}"#;
@@ -83,13 +103,6 @@ fn a_pending_exchange_pends_the_op_and_the_resume_answers() {
     let v = vault(200, OK_BODY, 1);
     assert!(v.resolve(T, &reference()).is_none(), "pending");
     assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
-}
-
-#[test]
-fn the_host_exchange_names_the_missing_http_exchange() {
-    let v = Vault::open(SETTINGS, &[&b"tok"[..]], 1).expect("opens");
-    let e = v.resolve(T, &reference()).unwrap().unwrap_err();
-    assert_eq!(error_kind(e.kind), ERROR_KIND_UNAVAILABLE);
 }
 
 #[test]
@@ -128,7 +141,7 @@ impl Exchange for Recording {
             .fields
             .iter()
             .find(|(n, _)| *n == "X-Vault-Token")
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.to_vec())
             .unwrap_or_default();
         self.tokens.lock().unwrap().push(token);
         Exchanged::Done(Ok(crate::Response {
@@ -145,12 +158,12 @@ impl Exchange for Recording {
 fn a_refresh_swaps_the_client_and_a_refused_refresh_keeps_it() {
     let tokens = std::sync::Arc::new(Mutex::new(Vec::new()));
     let cfg = crate::parse_config(SETTINGS).unwrap();
-    let v = Vault::new(
-        VaultClient::new(&cfg, b"tok1"),
-        Box::new(Recording {
+    let v = Rig {
+        vault: Vault::new(VaultClient::new(&cfg, b"tok1")),
+        exchange: Recording {
             tokens: tokens.clone(),
-        }),
-    );
+        },
+    };
     assert!(v.refresh(SETTINGS, &[&b"tok2"[..]], 2).is_ok());
     assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
     assert!(v.refresh(b"{}", &[&b"tok3"[..]], 3).is_err());

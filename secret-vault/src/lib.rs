@@ -28,7 +28,7 @@
 //!
 //! ## Sans-IO
 //!
-//! The plugin never opens a socket, dials or does TLS (THE DESIGN §5). [`VaultClient`] builds the
+//! The plugin never opens a socket, dials or does TLS. [`VaultClient`] builds the
 //! one request ([`Request`]) and judges the one response ([`Response`]); the bytes travel through
 //! an [`Exchange`] — the host's framed one-shot http exchange over this plugin's declared need
 //! (`operator-infrastructure`, target from `addr`, extra trusted root from `ca_cert_pem`). An
@@ -44,7 +44,7 @@
 //!
 //! ## Errors
 //!
-//! Fail-closed and specific, as 1.5.5: a 404 (no secret at that path), a 403 (bad token / missing
+//! Fail-closed and specific: a 404 (no secret at that path), a 403 (bad token / missing
 //! Vault policy) and a 5xx (Vault itself unhealthy) are distinct, human-readable errors, each tagged
 //! with its `abi::secret::ERROR_KIND_*`. No refusal carries the token, the material or any text of
 //! Vault's reply (its body, or the names of the fields it holds); an empty field is refused, never
@@ -58,6 +58,7 @@ use busbar_contract::abi::secret::{
 };
 use busbar_contract::secret::{SecretErrorKind, SecretModuleError, SecretResult};
 use serde::Deserialize;
+use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 pub mod door;
@@ -65,20 +66,19 @@ pub mod door;
 /// The plugin's name (the manifest name) and the `module` alias a reference spells.
 pub const NAME: &str = "busbar-secret-vault";
 
-/// Upper bound on a Vault KV v2 response body, as 1.5.5. A KV v2 entry is typically a handful of
-/// short fields; this is generous headroom while still bounding the allocation against a hostile
-/// or misbehaving Vault endpoint.
+/// Upper bound on a Vault KV v2 response body: generous headroom over a handful of short fields,
+/// while bounding the allocation against a hostile or misbehaving endpoint.
 pub const MAX_VAULT_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// The settings key whose value is the token's secret reference (the Statement's `secret_refs`).
 pub const TOKEN_KEY: &str = "token";
 
-/// Default HTTP timeout (connect + total), in seconds, as 1.5.5.
+/// Default HTTP timeout (connect + total), in seconds.
 fn default_timeout_secs() -> u64 {
     10
 }
 
-/// The open-time settings — the `secrets.<module>.settings` map, as 1.5.5 read it. `token` is its
+/// The open-time settings — the `secrets.<module>.settings` map. `token` is its
 /// secret reference as written (the material arrives through `open`'s secrets, never here). Its
 /// `Debug` prints `addr` without userinfo and never the token reference (which may be a literal).
 #[derive(Clone, Deserialize)]
@@ -86,7 +86,7 @@ fn default_timeout_secs() -> u64 {
 pub struct VaultConfig {
     /// The Vault server address, e.g. `https://vault.internal:8200`. A trailing slash is tolerated.
     pub addr: String,
-    /// The token's secret reference, as the operator wrote it (required, as 1.5.5).
+    /// The token's secret reference, as the operator wrote it (required).
     pub token: serde_json::Value,
     /// An ADDITIONAL trusted root CA certificate (PEM), layered on top of the public root store.
     /// Never disables certificate validation, only widens the trusted-root set. Carried to the
@@ -109,7 +109,7 @@ impl std::fmt::Debug for VaultConfig {
     }
 }
 
-/// Parse the open-time settings bytes, with 1.5.5's refusal texts: an empty (or whitespace-only)
+/// Parse the open-time settings bytes: an empty (or whitespace-only)
 /// config and a malformed one are refused, naming the plugin. Then each value is judged, so
 /// `validate`, `open` and `refresh` refuse what could never serve, naming the key and never
 /// quoting its value: an `addr` that is not an `http://` or `https://` URL naming a host (or that
@@ -173,8 +173,8 @@ fn addr_is_a_server_url(addr: &str) -> bool {
 
 /// Split a per-reference `settings` map into `(vault_path, field)`. Fail-closed: a missing `path`,
 /// or a `path` with no `#field` suffix and no separate `field` key, is an `Err` naming exactly
-/// what's missing, and a `field` that is not a string is refused rather than ignored. Texts are
-/// 1.5.5's; a blank `path` and a setting other than `path` and `field` are refused too (1.6.0).
+/// what's missing, and a `field` that is not a string is refused rather than ignored. A blank `path`
+/// and a setting other than `path` and `field` are refused too.
 ///
 /// # Errors
 /// [`SecretErrorKind::Invalid`], naming what is missing.
@@ -261,21 +261,13 @@ pub struct Request {
     /// (`addr`'s own path prefix included). Carries no secret.
     pub target: String,
     /// The head fields: `X-Vault-Token`.
-    pub fields: Vec<(&'static str, Vec<u8>)>,
+    pub fields: Vec<(&'static str, Arc<Zeroizing<Vec<u8>>>)>,
     /// The connect + total timeout, in milliseconds.
     pub timeout_ms: u64,
     /// The extra trusted root (PEM) the need's `trust_from` names; `None` = the public roots.
     pub trust_pem: Option<String>,
     /// The body cap: the response body buffer the exchange fills.
     pub body_cap: usize,
-}
-
-impl Drop for Request {
-    fn drop(&mut self) {
-        for (_, v) in &mut self.fields {
-            v.zeroize();
-        }
-    }
 }
 
 impl std::fmt::Debug for Request {
@@ -344,7 +336,7 @@ pub trait Exchange {
 /// once at `open` (and at `refresh`) and reused for every `resolve`.
 pub struct VaultClient {
     addr: String,
-    token: Zeroizing<Vec<u8>>,
+    token: Arc<Zeroizing<Vec<u8>>>,
     timeout_secs: u64,
     ca_cert_pem: Option<String>,
 }
@@ -365,7 +357,7 @@ impl VaultClient {
     pub fn new(cfg: &VaultConfig, token: &[u8]) -> Self {
         Self {
             addr: without_userinfo(cfg.addr.trim_end_matches('/')),
-            token: Zeroizing::new(token.to_vec()),
+            token: Arc::new(Zeroizing::new(token.to_vec())),
             timeout_secs: cfg.timeout_secs,
             ca_cert_pem: cfg.ca_cert_pem.clone(),
         }
@@ -402,7 +394,7 @@ impl VaultClient {
             method: "GET",
             url,
             target,
-            fields: vec![("X-Vault-Token", self.token.to_vec())],
+            fields: vec![("X-Vault-Token", Arc::clone(&self.token))],
             timeout_ms: self.timeout_secs.saturating_mul(1000),
             trust_pem: self.ca_cert_pem.clone(),
             // One byte past the cap tells "at the cap" from "over it" even if the host reports no
@@ -454,7 +446,7 @@ fn without_userinfo(addr: &str) -> String {
 
 /// `path` as a request target: every byte a URI cannot hold (C0 controls, space, `"`, `#`, `<`, `>`,
 /// a backtick, `{`, `}`, DEL and anything >= 0x80) written `%XX`; the rest, `?` (which keeps starting
-/// the query, as 1.5.5) and `%` included, unchanged. A `#` in `path` is therefore data, never a
+/// the query) and `%` included, unchanged. A `#` in `path` is therefore data, never a
 /// fragment.
 fn encode_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
@@ -468,7 +460,7 @@ fn encode_path(path: &str) -> String {
     out
 }
 
-/// `http`'s status rendering (`"404 Not Found"`), the text 1.5.5's client printed.
+/// `http`'s status rendering (`"404 Not Found"`).
 fn status_text(status: u16) -> String {
     match http::StatusCode::from_u16(status) {
         Ok(s) => s.to_string(),
@@ -476,13 +468,13 @@ fn status_text(status: u16) -> String {
     }
 }
 
-/// Judge one exchange's outcome for a read of `field` at `vault_path` from `url`, with 1.5.5's
-/// classes and texts, in 1.5.5's order: transport failure, 404, 403, 5xx, the body cap, any other
-/// non-2xx, then the KV v2 shape and the field.
+/// Judge one exchange's outcome for a read of `field` at `vault_path` from `url`, in this order:
+/// transport failure, 404, 403, 5xx, the body cap, any other non-2xx, then the KV v2 shape and the
+/// field.
 ///
-/// A transport failure keeps 1.5.5's text (`error sending request for url (..)`) as its prefix and
-/// the host's own cause follows it (`: {cause}`), so a refused need, an unarmed host or an oversize
-/// reply is explained; an empty cause leaves exactly the 1.5.5 text.
+/// A transport failure's text is `error sending request for url (..)` and the host's own cause
+/// follows it (`: {cause}`), so a refused need, an unarmed host or an oversize reply is explained;
+/// an empty cause leaves the bare text.
 ///
 /// The copies of the material this holds are wiped when released: the response body (taken into a
 /// `Zeroizing` buffer), the parsed JSON tree (every string value, on every return path) and the
