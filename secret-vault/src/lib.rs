@@ -58,6 +58,7 @@ use busbar_contract::abi::secret::{
 };
 use busbar_contract::secret::{SecretErrorKind, SecretModuleError, SecretResult};
 use serde::Deserialize;
+use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 pub mod door;
@@ -261,21 +262,13 @@ pub struct Request {
     /// (`addr`'s own path prefix included). Carries no secret.
     pub target: String,
     /// The head fields: `X-Vault-Token`.
-    pub fields: Vec<(&'static str, Vec<u8>)>,
+    pub fields: Vec<(&'static str, Arc<Zeroizing<Vec<u8>>>)>,
     /// The connect + total timeout, in milliseconds.
     pub timeout_ms: u64,
     /// The extra trusted root (PEM) the need's `trust_from` names; `None` = the public roots.
     pub trust_pem: Option<String>,
     /// The body cap: the response body buffer the exchange fills.
     pub body_cap: usize,
-}
-
-impl Drop for Request {
-    fn drop(&mut self) {
-        for (_, v) in &mut self.fields {
-            v.zeroize();
-        }
-    }
 }
 
 impl std::fmt::Debug for Request {
@@ -344,7 +337,7 @@ pub trait Exchange {
 /// once at `open` (and at `refresh`) and reused for every `resolve`.
 pub struct VaultClient {
     addr: String,
-    token: Zeroizing<Vec<u8>>,
+    token: Arc<Zeroizing<Vec<u8>>>,
     timeout_secs: u64,
     ca_cert_pem: Option<String>,
 }
@@ -365,7 +358,7 @@ impl VaultClient {
     pub fn new(cfg: &VaultConfig, token: &[u8]) -> Self {
         Self {
             addr: without_userinfo(cfg.addr.trim_end_matches('/')),
-            token: Zeroizing::new(token.to_vec()),
+            token: Arc::new(Zeroizing::new(token.to_vec())),
             timeout_secs: cfg.timeout_secs,
             ca_cert_pem: cfg.ca_cert_pem.clone(),
         }
@@ -402,7 +395,7 @@ impl VaultClient {
             method: "GET",
             url,
             target,
-            fields: vec![("X-Vault-Token", self.token.to_vec())],
+            fields: vec![("X-Vault-Token", Arc::clone(&self.token))],
             timeout_ms: self.timeout_secs.saturating_mul(1000),
             trust_pem: self.ca_cert_pem.clone(),
             // One byte past the cap tells "at the cap" from "over it" even if the host reports no

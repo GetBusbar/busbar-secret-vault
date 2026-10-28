@@ -156,7 +156,7 @@ impl Exchange for HostExchange<'_> {
                 fields: request
                     .fields
                     .iter()
-                    .map(|(n, v)| (n.as_bytes().to_vec(), v.clone()))
+                    .map(|(n, v)| (n.as_bytes().to_vec(), v.to_vec()))
                     .collect(),
                 body: Vec::new(),
                 timeout_ms: request.timeout_ms,
@@ -166,12 +166,16 @@ impl Exchange for HostExchange<'_> {
             std::task::Poll::Pending => Exchanged::Pending,
             std::task::Poll::Ready(Err(e)) => Exchanged::Done(Err(e.to_string())),
             std::task::Poll::Ready(Ok(mut r)) => {
-                // A copy of at most the cap, then the whole reply is wiped: no tail is left behind.
+                // The body is moved, cut to the cap; what lies past the cap is wiped, and the rest
+                // of the reply with it: no tail is left behind.
                 let body_len = r.body.len();
                 let kept = body_len.min(request.body_cap);
+                r.body[kept..].zeroize();
+                let mut body = std::mem::take(&mut r.body);
+                body.truncate(kept);
                 let response = crate::Response {
                     status: r.status,
-                    body: r.body[..kept].to_vec(),
+                    body,
                     body_len,
                 };
                 r.zeroize();
@@ -181,11 +185,9 @@ impl Exchange for HostExchange<'_> {
     }
 }
 
-/// One instance: the client (swapped whole on `refresh`), and the exchange a test stands in for
-/// the host's (`None`: each op's own [`HostExchange`]).
+/// One instance: the client, swapped whole on `refresh`.
 pub struct Vault {
     client: RwLock<Arc<VaultClient>>,
-    exchange: Option<Box<dyn Exchange + Send + Sync>>,
 }
 
 impl std::fmt::Debug for Vault {
@@ -195,20 +197,11 @@ impl std::fmt::Debug for Vault {
 }
 
 impl Vault {
-    /// An instance over `client`, exchanging through `exchange` (a test's stand-in for the host).
-    pub fn new(client: VaultClient, exchange: Box<dyn Exchange + Send + Sync>) -> Self {
-        Self {
-            client: RwLock::new(Arc::new(client)),
-            exchange: Some(exchange),
-        }
-    }
-
-    /// An instance over `client`, each op exchanging through the host ([`HostExchange`]).
+    /// An instance over `client`.
     #[must_use]
-    pub fn over_host(client: VaultClient) -> Self {
+    pub fn new(client: VaultClient) -> Self {
         Self {
             client: RwLock::new(Arc::new(client)),
-            exchange: None,
         }
     }
 
@@ -220,20 +213,9 @@ impl Vault {
             .clone()
     }
 
-    /// `resolve` for the op on `ticket`, over its settings bytes: `None` while the exchange is
-    /// pending.
-    pub fn resolve(&self, ticket: Ticket, settings: &[u8]) -> Option<SecretResult<Vec<u8>>> {
-        match &self.exchange {
-            Some(exchange) => self.resolve_over(exchange.as_ref(), ticket, settings),
-            None => Some(Err(busbar_contract::secret::SecretModuleError::new(
-                busbar_contract::secret::SecretErrorKind::Unavailable,
-                "the host lends this instance no exchange outside an op",
-            ))),
-        }
-    }
-
-    /// `resolve` over `exchange` (the op's [`HostExchange`], or a test's stand-in).
-    pub fn resolve_over(
+    /// `resolve` for the op on `ticket` over `exchange` (the op's [`HostExchange`]), over its
+    /// settings bytes: `None` while the exchange is pending.
+    pub fn resolve(
         &self,
         exchange: &dyn Exchange,
         ticket: Ticket,
@@ -246,11 +228,6 @@ impl Vault {
                 .resolve(&s, exchange, (ticket.slot, ticket.generation)),
         }
     }
-
-    /// Whether this instance exchanges through the host (no test stand-in).
-    fn over_the_host(&self) -> bool {
-        self.exchange.is_none()
-    }
 }
 
 impl Life for Vault {
@@ -261,7 +238,7 @@ impl Life for Vault {
     }
 
     fn open(settings: &[u8], secrets: &[&[u8]], _: u64) -> Result<Self, Refusal> {
-        Ok(Vault::over_host(client(settings, secrets)?))
+        Ok(Vault::new(client(settings, secrets)?))
     }
 
     fn refresh(&self, settings: &[u8], secrets: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
@@ -289,12 +266,8 @@ impl SafeSlot for Resolve {
         };
         let settings = input.field(|i| &i.settings).bytes();
         let vault = held.life();
-        let answered = if vault.over_the_host() {
-            let exchange = HostExchange::new(&instance, held.host());
-            vault.resolve_over(&exchange, instance.ticket(), settings)
-        } else {
-            vault.resolve(instance.ticket(), settings)
-        };
+        let exchange = HostExchange::new(&instance, held.host());
+        let answered = vault.resolve(&exchange, instance.ticket(), settings);
         match answered {
             None => Outcome::Pending,
             Some(Ok(material)) => {

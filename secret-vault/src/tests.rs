@@ -308,7 +308,8 @@ fn the_request_is_1_5_5s_get_with_the_token_header() {
         r.url, URL,
         "trailing slash trimmed once, leading slash of the path trimmed"
     );
-    assert_eq!(r.fields, vec![("X-Vault-Token", TOKEN.to_vec())]);
+    let fields: Vec<(&str, &[u8])> = r.fields.iter().map(|(n, v)| (*n, v.as_slice())).collect();
+    assert_eq!(fields, vec![("X-Vault-Token", TOKEN)]);
     assert_eq!(r.timeout_ms, 10_000);
     assert_eq!(r.body_cap, MAX_VAULT_RESPONSE_BYTES + 1);
     assert!(r.trust_pem.is_none());
