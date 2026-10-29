@@ -10,8 +10,9 @@
 //!   reference, so the kernel resolves it and lends the material in `OpenIn::secrets[0]`.
 //! * `refresh` — a reload's new settings and re-resolved token replace the client; a refusal keeps
 //!   the running one.
-//! * `resolve` — a reference to its field's material, READY under a lease (the SDK's [`Held`]
-//!   leases, zeroed on release), FAILED with its `ERROR_KIND_*` and its text, or PENDING while
+//! * `resolve` — a reference to its field's material, READY with the material written into the
+//!   host's zeroed buffer (the SDK's `resolved`; no lease, the plugin's copy wiped), FAILED with its
+//!   `ERROR_KIND_*` and its text, or PENDING while
 //!   the host's exchange runs.
 //! * `release`, `close`, `cancel`, `tick`, `retire`, `drive` — the SDK's: a KV v2 read carries no
 //!   Vault lease to renew.
@@ -21,19 +22,21 @@ use std::sync::{Arc, PoisonError, RwLock};
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, BLOB_OCTETS};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome};
 use busbar_contract::abi::mechanism::door::Statement;
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::Host;
+use busbar_contract::abi::sdk::cred::{self, resolved};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{self as sdk, Op};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::secret::{failed, settings_of};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
-use busbar_contract::abi::secret::{cancel, ResolveIn, ResolveOut, ERROR_KIND_UNSET};
+use busbar_contract::abi::secret::{cancel, ResolveIn, ResolveOut};
 use busbar_contract::secret::SecretResult;
 use zeroize::Zeroize;
 
-use crate::{error_kind, parse_config, settings_of, Exchange, Exchanged, Request, VaultClient};
+use crate::{parse_config, Exchange, Exchanged, Request, VaultClient};
 
 /// The settings keys whose values are secret references, in `OpenIn::secrets` order.
 const SECRET_REFS: &[AbiStr] = &[abi_str(crate::TOKEN_KEY)];
@@ -248,8 +251,9 @@ impl Life for Vault {
     }
 }
 
-/// `resolve`: see [`Vault::resolve`]. READY with the material under a lease (an empty field is
-/// refused, never resolved empty), FAILED with its code and text, PENDING while the exchange runs.
+/// `resolve`: see [`Vault::resolve`]. READY with the material written into the host's zeroed
+/// buffer (the SDK's `resolved`; no lease, the plugin's copy wiped; an empty field is refused,
+/// never resolved empty), FAILED with its code and text, PENDING while the exchange runs.
 pub struct Resolve;
 
 impl SafeSlot for Resolve {
@@ -270,15 +274,8 @@ impl SafeSlot for Resolve {
         let answered = vault.resolve(&exchange, instance.ticket(), settings);
         match answered {
             None => Outcome::Pending,
-            Some(Ok(material)) => {
-                out.lease_secret(|o| &o.secret, held.leases(), material, BLOB_OCTETS);
-                out.set(|o| &o.error_kind, ERROR_KIND_UNSET);
-                Outcome::Ready
-            }
-            Some(Err(e)) => {
-                out.set(|o| &o.error_kind, error_kind(e.kind));
-                out.fail(Refusal::failed(e.message))
-            }
+            Some(Ok(material)) => resolved(input, &mut out, cred::Held::new(material)),
+            Some(Err(e)) => failed(&mut out, e),
         }
     }
 }

@@ -8,6 +8,7 @@
 //! `tests/conformance.rs`.
 
 use super::*;
+use busbar_contract::abi::sdk::secret::error_kind;
 use busbar_contract::abi::secret::{ERROR_KIND_DENIED, ERROR_KIND_INVALID};
 use busbar_contract::secret::SecretErrorKind;
 use serde_json::json;

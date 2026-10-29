@@ -7,6 +7,7 @@
 //! — a real round trip against a live Vault dev-mode server.
 
 use super::*;
+use busbar_contract::abi::sdk::secret::{error_kind, settings_of};
 use busbar_contract::secret::SecretErrorKind;
 use serde_json::json;
 

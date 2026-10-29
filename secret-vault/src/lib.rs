@@ -52,11 +52,7 @@
 
 #![forbid(unsafe_code)]
 
-use busbar_contract::abi::secret::{
-    ERROR_KIND_DENIED, ERROR_KIND_INTERNAL, ERROR_KIND_INVALID, ERROR_KIND_NOT_FOUND,
-    ERROR_KIND_UNAVAILABLE,
-};
-use busbar_contract::secret::{SecretErrorKind, SecretModuleError, SecretResult};
+use busbar_contract::secret::{SecretModuleError, SecretResult};
 use serde::Deserialize;
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
@@ -177,7 +173,7 @@ fn addr_is_a_server_url(addr: &str) -> bool {
 /// and a setting other than `path` and `field` are refused too.
 ///
 /// # Errors
-/// [`SecretErrorKind::Invalid`], naming what is missing.
+/// [`SecretErrorKind::Invalid`](busbar_contract::secret::SecretErrorKind::Invalid), naming what is missing.
 pub fn parse_reference(
     settings: &serde_json::Map<String, serde_json::Value>,
 ) -> SecretResult<(String, String)> {
@@ -221,31 +217,6 @@ pub fn parse_reference(
             "vault secret reference must name a field to extract: either add a `field` key, or \
              suffix `path` with `#<field>` (e.g. \"kv/data/openai#api_key\"); got path {path:?}"
         ))),
-    }
-}
-
-/// A `resolve`'s settings blob as an object (empty = `{}`).
-///
-/// # Errors
-/// [`SecretErrorKind::Invalid`]: the bytes are not a JSON object.
-pub fn settings_of(bytes: &[u8]) -> SecretResult<serde_json::Map<String, serde_json::Value>> {
-    if bytes.is_empty() {
-        return Ok(serde_json::Map::new());
-    }
-    serde_json::from_slice(bytes).map_err(|e| {
-        SecretModuleError::invalid(format!("secret settings are not a JSON object: {e}"))
-    })
-}
-
-/// The `abi::secret::ERROR_KIND_*` code of a [`SecretErrorKind`].
-#[must_use]
-pub const fn error_kind(kind: SecretErrorKind) -> u32 {
-    match kind {
-        SecretErrorKind::NotFound => ERROR_KIND_NOT_FOUND,
-        SecretErrorKind::Unavailable => ERROR_KIND_UNAVAILABLE,
-        SecretErrorKind::Denied => ERROR_KIND_DENIED,
-        SecretErrorKind::Invalid => ERROR_KIND_INVALID,
-        SecretErrorKind::Internal => ERROR_KIND_INTERNAL,
     }
 }
 
@@ -373,7 +344,7 @@ impl VaultClient {
     /// `{addr}/v1/{path}` with the bytes a URI cannot hold percent-encoded; it is never a fallback.
     ///
     /// # Errors
-    /// [`SecretErrorKind::Unavailable`]: the request URL is not a valid URL.
+    /// [`SecretErrorKind::Unavailable`](busbar_contract::secret::SecretErrorKind::Unavailable): the request URL is not a valid URL.
     pub fn request(&self, vault_path: &str) -> SecretResult<Request> {
         let url = self.url(vault_path);
         let encoded = encode_path(vault_path.trim_start_matches('/'));
