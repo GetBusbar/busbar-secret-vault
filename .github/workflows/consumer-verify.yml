@@ -16,11 +16,12 @@ on:
 
 permissions:
   contents: read
+  issues: write
   actions: read
 
 jobs:
   consumer:
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@f4a731af87e217222783b447c9e7e9f7cdab3143
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@584b6cefb9667372e13e95bee57b883f2cc909b8
     with:
       version: ${{ inputs.version || '' }}
       asset_prefix: busbar-secret-vault
@@ -29,3 +30,4 @@ jobs:
       plugin_kind: secret
       bundle_image: ""
       bundle_env: ""
+    secrets: inherit
