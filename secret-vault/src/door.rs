@@ -30,12 +30,13 @@ use busbar_contract::abi::sdk::cred::{self, resolved};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{self as sdk, Op};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::secret::{failed, settings_of};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::abi::secret::{cancel, ResolveIn, ResolveOut};
 use busbar_contract::secret::SecretResult;
 use zeroize::Zeroize;
 
-use crate::{error_kind, parse_config, settings_of, Exchange, Exchanged, Request, VaultClient};
+use crate::{parse_config, Exchange, Exchanged, Request, VaultClient};
 
 /// The settings keys whose values are secret references, in `OpenIn::secrets` order.
 const SECRET_REFS: &[AbiStr] = &[abi_str(crate::TOKEN_KEY)];
@@ -274,10 +275,7 @@ impl SafeSlot for Resolve {
         match answered {
             None => Outcome::Pending,
             Some(Ok(material)) => resolved(input, &mut out, cred::Held::new(material)),
-            Some(Err(e)) => {
-                out.set(|o| &o.error_kind, error_kind(e.kind));
-                out.fail(Refusal::failed(e.message))
-            }
+            Some(Err(e)) => failed(&mut out, e),
         }
     }
 }
