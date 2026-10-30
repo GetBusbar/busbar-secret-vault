@@ -12,10 +12,6 @@ The HashiCorp Vault secret backend as a droppable busbar plugin: a cdylib export
 
 ## What it is for
 
-**This plugin's version: v1.6.0.** (Independently versioned from busbar
-itself — see [Versioning](#versioning) below.)
-
-[![CI](https://github.com/GetBusbar/busbar-secret-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/GetBusbar/busbar-secret-vault/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/GetBusbar/busbar-secret-vault)](https://github.com/GetBusbar/busbar-secret-vault/releases)
 [![Coverage](https://codecov.io/gh/GetBusbar/busbar-secret-vault/branch/dev/graph/badge.svg)](https://codecov.io/gh/GetBusbar/busbar-secret-vault)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -88,14 +84,16 @@ AppRole/Kubernetes login flows are a natural future extension of
 | Setting | Required | Default | Notes |
 |---|---|---|---|
 | `addr` | yes | — | The Vault server address, e.g. `https://vault.internal:8200` (or `http://127.0.0.1:8200` for a local dev-mode server). It must be an `http://` or `https://` URL naming a host, with no query or fragment; any userinfo is stripped. |
-| `token` | yes | — | The Vault token sent as `X-Vault-Token` on every read. Should be delivered as a secret reference (`{ env: VAULT_TOKEN }`), never a plaintext literal — module-level settings cannot reference another secret plugin, only the built-in `env`/`file` modules. |
-| `ca_cert_pem` | no | — | An additional trusted root CA (PEM), layered on top of the built-in public root store — for a self-hosted Vault behind a private CA. Never disables certificate validation. A value holding no `-----BEGIN CERTIFICATE-----` block is refused. |
-| `timeout_secs` | no | `10` | HTTP timeout (connect + total), in seconds; at least 1. |
+| `token` | yes | — | The Vault token sent as `X-Vault-Token` on every read. Should be delivered as a secret reference (`{ env: VAULT_TOKEN }`), never a plaintext literal. The kernel resolves it through the bootstrap secret plugins (the built-in `env`/`file` forms, or another secret plugin) and hands the material to `open`. Material containing a CR or LF is refused at `open`/`refresh`, since it could never be sent as a header. |
+| `ca_cert_pem` | no | — | An additional trusted root CA (PEM), layered on top of the built-in public root store — for a self-hosted Vault behind a private CA. Never disables certificate validation. A value holding no `-----BEGIN CERTIFICATE-----` block, or a block whose body is not valid base64 or not a DER SEQUENCE of its stated length, is refused (`invalid ca_cert_pem: ...`). |
+| `timeout_secs` | no | `10` | HTTP timeout (connect + total), in seconds; at least 1. The host bounds every resolve by its 30 s call deadline, so a larger value cannot extend it. |
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
 stray key fails loudly at boot instead of being silently ignored. `validate`,
-`open` and `refresh` refuse the same settings, naming the key and never
-quoting its value.
+`open` and `refresh` refuse the same settings, naming the key; the
+refusals this plugin words itself never quote a value, but a JSON type
+error from the parser (e.g. a `timeout_secs` of the wrong type) can quote
+the offending, non-secret value.
 
 ### Per-reference settings (`{ module: vault, settings: {...} }`)
 
@@ -108,16 +106,17 @@ must name which field to extract, in one of two equivalent forms:
 | `#field` suffix on `path` | `{ "path": "kv/data/openai#api_key" }` |
 | separate `field` key | `{ "path": "kv/data/openai", "field": "api_key" }` |
 
-If both are given, the explicit `field` key wins. `path` is used verbatim
+If both are given, the explicit `field` key wins. `path` is used
 after `{addr}/v1/` — this plugin never prepends a mount or a `data/`
-segment itself. A blank `path`, and any setting other than `path` and
+segment itself. As in 1.5.5, the URL is normalised like any http(s) URL: `\` is `/`, `.` segments are dropped and `..` pops the segment before it (never above the root). A blank `path`, and any setting other than `path` and
 `field`, is refused INVALID.
 
 A 404 (no secret at that path), a 403 (bad token / missing Vault
 policy), and a 5xx (Vault itself unhealthy) each surface as a distinct,
 specific error — never collapsed into a generic "resolve failed", and
 never an empty `Ok`: an empty field is refused INVALID. A redirect (3xx)
-is not followed; the refusal says to point `addr` at the address Vault
+is not followed (the token is never sent to a host the operator did not
+configure); the refusal says to point `addr` at the address Vault
 redirects to. No refusal quotes Vault's reply (its body, or the names of
 the fields a secret holds), the token or the material.
 
@@ -143,8 +142,10 @@ The one [busbar](https://github.com/GetBusbar/busbar) crate either crate
 names is `busbar-contract` — the plugin contract, whose `abi::sdk` module
 carries the door macros. `busbar-plugin-loader` is a dev-dependency only,
 for the linked + dropped-in conformance test. Both are **git dependencies
-pinned to one busbar commit**: the `rev` in every `Cargo.toml` is field 1
-of `.busbar-ref`, and CI's `pin` job refuses a manifest that disagrees.
+pinned to one busbar commit**: the `rev` in the root `Cargo.toml`'s
+`[workspace.dependencies]` table (the members take it with
+`{ workspace = true }`) is field 1 of `.busbar-ref`, and the single `ci`
+job refuses a manifest that disagrees.
 No sibling checkout of busbar is needed to build or test.
 
 ### Pack and sign
@@ -207,8 +208,8 @@ get`/the Vault UI show), with the field to extract named either as a
 - `busbar-secret-vault`'s hermetic unit tests: reference parsing, the
   request it builds, every 1.5.5 response class and its text (a transport failure appends the host's cause), the
   body cap, a pending exchange, the config refusals, and the door's
-  lease map (READY under a lease, zeroed on release, FAILED with its
-  `ERROR_KIND_*`, PENDING then resumed). One test reads a real Vault
+  slots (READY with the material written into the host's buffer under no
+  lease, FAILED with its `ERROR_KIND_*`, PENDING then resumed). One test reads a real Vault
   dev-mode server, gated on `BUSBAR_TEST_VAULT_ADDR` /
   `BUSBAR_TEST_VAULT_TOKEN` (hard-fails under `CI` when unset), through
   the sans-IO client with a test-side HTTP exchange;

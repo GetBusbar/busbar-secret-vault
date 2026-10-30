@@ -152,7 +152,7 @@ fn roundtrip_against_live_vault() {
     // `#field` addressing (the published doc convention).
     let hash_settings = settings(json!({ "path": "secret/data/busbar-test#api_key" }));
     let got = module
-        .resolve(&hash_settings, &ex, T)
+        .resolve(&hash_settings, &ex)
         .unwrap()
         .expect("resolve api_key");
     assert_eq!(got, b"sk-live-abc123");
@@ -161,14 +161,14 @@ fn roundtrip_against_live_vault() {
     let explicit_settings =
         settings(json!({ "path": "secret/data/busbar-test", "field": "org_id" }));
     let got = module
-        .resolve(&explicit_settings, &ex, T)
+        .resolve(&explicit_settings, &ex)
         .unwrap()
         .expect("resolve org_id");
     assert_eq!(got, b"org-xyz");
 
     // A wrong path is a distinct, loud 404 — never an empty Ok.
     let missing = settings(json!({ "path": "secret/data/no-such-secret#x" }));
-    let err = module.resolve(&missing, &ex, T).unwrap().unwrap_err();
+    let err = module.resolve(&missing, &ex).unwrap().unwrap_err();
     assert_eq!(err.kind, SecretErrorKind::NotFound);
     assert!(
         err.message.contains("404"),
@@ -178,7 +178,7 @@ fn roundtrip_against_live_vault() {
 
     // A wrong field on a REAL path is also a distinct, loud error naming the field.
     let bad_field = settings(json!({ "path": "secret/data/busbar-test#no_such_field" }));
-    let err = module.resolve(&bad_field, &ex, T).unwrap().unwrap_err();
+    let err = module.resolve(&bad_field, &ex).unwrap().unwrap_err();
     assert_eq!(err.kind, SecretErrorKind::NotFound);
     assert!(
         err.message.contains("no_such_field"),
@@ -188,7 +188,7 @@ fn roundtrip_against_live_vault() {
 
     // A bad token is a distinct, loud 403 — never conflated with the 404 path.
     let bad = VaultClient::new(&cfg(&addr), b"not-a-real-token");
-    let err = bad.resolve(&hash_settings, &ex, T).unwrap().unwrap_err();
+    let err = bad.resolve(&hash_settings, &ex).unwrap().unwrap_err();
     assert_eq!(err.kind, SecretErrorKind::Denied);
     assert!(
         err.message.contains("403"),
@@ -198,9 +198,6 @@ fn roundtrip_against_live_vault() {
 }
 
 // ── the sans-IO client ──────────────────────────────────────────────────────────────────────────
-
-/// The ticket every test op runs on.
-const T: (u32, u32) = (1, 1);
 
 /// The token the tests' client holds; no error text may carry it.
 const TOKEN: &[u8] = b"s.never-in-a-message";
@@ -219,7 +216,7 @@ fn cfg(addr: &str) -> VaultConfig {
 struct ReqwestExchange;
 
 impl Exchange for ReqwestExchange {
-    fn exchange(&self, _: (u32, u32), r: &Request) -> Exchanged {
+    fn exchange(&self, r: &Request) -> Exchanged {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_millis(r.timeout_ms))
             .build()
@@ -269,7 +266,7 @@ impl Canned {
 }
 
 impl Exchange for Canned {
-    fn exchange(&self, _: (u32, u32), r: &Request) -> Exchanged {
+    fn exchange(&self, r: &Request) -> Exchanged {
         self.seen
             .lock()
             .unwrap()
@@ -283,7 +280,7 @@ const URL: &str = "http://vault.internal:8200/v1/kv/data/openai";
 
 fn run(ex: &dyn Exchange, reference: serde_json::Value) -> SecretResult<Vec<u8>> {
     let r = VaultClient::new(&cfg(ADDR), TOKEN)
-        .resolve(&settings(reference), ex, T)
+        .resolve(&settings(reference), ex)
         .expect("a canned exchange never pends");
     if let Err(e) = &r {
         let token = String::from_utf8_lossy(TOKEN);
@@ -649,13 +646,13 @@ fn the_body_cap_is_judged_before_any_other_non_2xx() {
 }
 
 /// An exchange that pends once, then answers: the op answers "not yet", and the re-invoked op
-/// on the same ticket receives the stored result without a second request.
+/// asks again and the exchange answers.
 struct PendsOnce {
     calls: std::sync::Mutex<u32>,
 }
 
 impl Exchange for PendsOnce {
-    fn exchange(&self, _: (u32, u32), _: &Request) -> Exchanged {
+    fn exchange(&self, _: &Request) -> Exchanged {
         let mut n = self.calls.lock().unwrap();
         *n += 1;
         if *n == 1 {
@@ -677,8 +674,8 @@ fn a_pending_exchange_pends_the_resolve_then_answers_on_resume() {
     };
     let c = VaultClient::new(&cfg(ADDR), TOKEN);
     let s = settings(json!({ "path": "kv/data/openai#k" }));
-    assert!(c.resolve(&s, &ex, T).is_none(), "pending");
-    assert_eq!(c.resolve(&s, &ex, T).unwrap().unwrap(), b"late");
+    assert!(c.resolve(&s, &ex).is_none(), "pending");
+    assert_eq!(c.resolve(&s, &ex).unwrap().unwrap(), b"late");
 }
 
 #[test]
@@ -763,7 +760,6 @@ fn the_framed_target_percent_encodes_what_a_uri_cannot_hold() {
         .resolve(
             &settings(json!({ "path": "kv/data/a#b", "field": "k" })),
             &ex,
-            T,
         )
         .unwrap();
     assert_eq!(got.unwrap(), b"v");
@@ -780,7 +776,7 @@ fn an_addr_that_is_no_url_is_refused_before_any_exchange() {
     let ex = Canned::status(200, &kv2(json!({ "k": "v" })));
     let c = VaultClient::new(&cfg("vault.internal:8200"), TOKEN);
     let e = c
-        .resolve(&settings(json!({ "path": "kv/data/x#k" })), &ex, T)
+        .resolve(&settings(json!({ "path": "kv/data/x#k" })), &ex)
         .unwrap()
         .unwrap_err();
     assert_eq!(e.kind, SecretErrorKind::Unavailable);
@@ -823,7 +819,7 @@ fn addr_userinfo_is_never_printed() {
     ] {
         let c = VaultClient::new(&cfg(addr), TOKEN);
         let e = c
-            .resolve(&reference, &Canned::status(404, "{}"), T)
+            .resolve(&reference, &Canned::status(404, "{}"))
             .unwrap()
             .unwrap_err();
         assert!(e.message.contains(shown), "{}", e.message);

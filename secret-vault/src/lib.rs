@@ -59,7 +59,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 pub mod door;
 
-/// The plugin's name (the manifest name) and the `module` alias a reference spells.
+/// The plugin's name: the Statement's and the manifest's. (The `module` alias a reference spells is
+/// `vault`.)
 pub const NAME: &str = "busbar-secret-vault";
 
 /// Upper bound on a Vault KV v2 response body: generous headroom over a handful of short fields,
@@ -89,7 +90,8 @@ pub struct VaultConfig {
     /// host as the need's `trust_from`.
     #[serde(default)]
     pub ca_cert_pem: Option<String>,
-    /// HTTP timeout (connect + total), in seconds. Default 10.
+    /// HTTP timeout (connect + total), in seconds. Default 10. The host bounds every resolve by its
+    /// 30 s call deadline, so a larger value cannot extend it.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
 }
@@ -107,8 +109,9 @@ impl std::fmt::Debug for VaultConfig {
 
 /// Parse the open-time settings bytes: an empty (or whitespace-only)
 /// config and a malformed one are refused, naming the plugin. Then each value is judged, so
-/// `validate`, `open` and `refresh` refuse what could never serve, naming the key and never
-/// quoting its value: an `addr` that is not an `http://` or `https://` URL naming a host (or that
+/// `validate`, `open` and `refresh` refuse what could never serve, naming the key (the texts
+/// this crate words never quote a value; a JSON type error from `serde_json` can quote the
+/// offending, non-secret value): an `addr` that is not an `http://` or `https://` URL naming a host (or that
 /// carries a query or fragment, which the request URL cannot carry), a `ca_cert_pem` holding no PEM
 /// certificate, and a `timeout_secs` of 0.
 ///
@@ -187,7 +190,7 @@ fn check_ca_cert_pem(pem: &str) -> Result<(), String> {
 /// no stray bytes, no non-zero trailing bits. `None` when it is not, or decodes to nothing.
 fn decode_base64(text: &str) -> Option<Vec<u8>> {
     let symbols: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if symbols.is_empty() || symbols.len() % 4 != 0 {
+    if symbols.is_empty() || !symbols.len().is_multiple_of(4) {
         return None;
     }
     let pad = symbols.iter().rev().take_while(|&&b| b == b'=').count();
@@ -306,7 +309,9 @@ pub fn parse_reference(
 }
 
 /// ONE framed http request, as the plugin hands it to the host's exchange. The token rides as a
-/// head field; `Debug` never prints field values, and dropping the request zeroizes them.
+/// head field; `Debug` never prints field values. The fields are clones of the client's token (`Arc`),
+/// so the token is wiped when the client (and every request still holding it) drops, not when one
+/// request does.
 pub struct Request {
     /// The method (`GET`).
     pub method: &'static str,
@@ -380,12 +385,13 @@ pub enum Exchanged {
     Done(Result<Response, String>),
 }
 
-/// The host's framed one-shot http exchange, as the plugin sees it. `ticket` names the op: a
-/// re-invoked op asking again on the same ticket receives the stored result, never a second
-/// request.
+/// The host's framed one-shot http exchange, as the plugin sees it: the seam
+/// [`door::HostExchange`] implements in production and tests stand in for. Re-serving a stored
+/// result to a re-invoked op is the SDK `Op`'s job (it holds the parked exchange on the op's
+/// ticket), not this trait's.
 pub trait Exchange {
-    /// Run (or collect) the exchange for `ticket`.
-    fn exchange(&self, ticket: (u32, u32), request: &Request) -> Exchanged;
+    /// Run (or collect) the exchange.
+    fn exchange(&self, request: &Request) -> Exchanged;
 }
 
 /// The Vault client: the resolved `addr`, the token material and the transport settings, built
@@ -459,13 +465,11 @@ impl VaultClient {
         })
     }
 
-    /// Resolve `settings` (a reference) through `exchange` for the op on `ticket`: `None` while
-    /// the exchange is pending.
+    /// Resolve `settings` (a reference) through `exchange`: `None` while the exchange is pending.
     pub fn resolve(
         &self,
         settings: &serde_json::Map<String, serde_json::Value>,
         exchange: &dyn Exchange,
-        ticket: (u32, u32),
     ) -> Option<SecretResult<Vec<u8>>> {
         let (path, field) = match parse_reference(settings) {
             Ok(r) => r,
@@ -475,7 +479,7 @@ impl VaultClient {
             Ok(r) => r,
             Err(e) => return Some(Err(e)),
         };
-        match exchange.exchange(ticket, &request) {
+        match exchange.exchange(&request) {
             Exchanged::Pending => None,
             Exchanged::Done(result) => Some(judge(&path, &field, &request.url, result)),
         }

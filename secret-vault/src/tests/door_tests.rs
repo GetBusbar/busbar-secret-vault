@@ -14,11 +14,6 @@ use busbar_contract::secret::SecretErrorKind;
 use serde_json::json;
 use std::sync::Mutex;
 
-const T: Ticket = Ticket {
-    slot: 1,
-    generation: 1,
-};
-
 /// An exchange answering `status` + `body` after `pends` pending answers.
 struct Scripted {
     status: u16,
@@ -27,7 +22,7 @@ struct Scripted {
 }
 
 impl Exchange for Scripted {
-    fn exchange(&self, _: (u32, u32), _: &Request) -> Exchanged {
+    fn exchange(&self, _: &Request) -> Exchanged {
         let mut p = self.pends.lock().unwrap();
         if *p > 0 {
             *p -= 1;
@@ -51,8 +46,8 @@ struct Rig<E> {
 }
 
 impl<E: Exchange> Rig<E> {
-    fn resolve(&self, ticket: Ticket, settings: &[u8]) -> Option<SecretResult<Vec<u8>>> {
-        self.vault.resolve(&self.exchange, ticket, settings)
+    fn resolve(&self, settings: &[u8]) -> Option<SecretResult<Vec<u8>>> {
+        self.vault.resolve(&self.exchange, settings)
     }
 }
 
@@ -84,17 +79,17 @@ fn reference() -> Vec<u8> {
 #[test]
 fn a_read_answers_the_material() {
     let v = vault(200, OK_BODY, 0);
-    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert_eq!(v.resolve(&reference()).unwrap().unwrap(), b"material");
 }
 
 #[test]
 fn a_refusal_answers_its_kind() {
     let v = vault(403, "denied", 0);
-    let e = v.resolve(T, &reference()).unwrap().unwrap_err();
+    let e = v.resolve(&reference()).unwrap().unwrap_err();
     assert_eq!(error_kind(e.kind), ERROR_KIND_DENIED);
     assert!(!e.message.is_empty(), "a refusal names its reason");
 
-    let e = v.resolve(T, b"[not an object]").unwrap().unwrap_err();
+    let e = v.resolve(b"[not an object]").unwrap().unwrap_err();
     assert_eq!(e.kind, SecretErrorKind::Invalid);
     assert_eq!(error_kind(e.kind), ERROR_KIND_INVALID);
 }
@@ -102,8 +97,8 @@ fn a_refusal_answers_its_kind() {
 #[test]
 fn a_pending_exchange_pends_the_op_and_the_resume_answers() {
     let v = vault(200, OK_BODY, 1);
-    assert!(v.resolve(T, &reference()).is_none(), "pending");
-    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert!(v.resolve(&reference()).is_none(), "pending");
+    assert_eq!(v.resolve(&reference()).unwrap().unwrap(), b"material");
 }
 
 #[test]
@@ -149,7 +144,7 @@ struct Recording {
 }
 
 impl Exchange for Recording {
-    fn exchange(&self, _: (u32, u32), r: &Request) -> Exchanged {
+    fn exchange(&self, r: &Request) -> Exchanged {
         let token = r
             .fields
             .iter()
@@ -178,9 +173,9 @@ fn a_refresh_swaps_the_client_and_a_refused_refresh_keeps_it() {
         },
     };
     assert!(v.refresh(SETTINGS, &[&b"tok2"[..]], 2).is_ok());
-    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert_eq!(v.resolve(&reference()).unwrap().unwrap(), b"material");
     assert!(v.refresh(b"{}", &[&b"tok3"[..]], 3).is_err());
-    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert_eq!(v.resolve(&reference()).unwrap().unwrap(), b"material");
     assert_eq!(
         *tokens.lock().unwrap(),
         vec![b"tok2".to_vec(), b"tok2".to_vec()]

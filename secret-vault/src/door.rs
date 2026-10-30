@@ -24,7 +24,6 @@ use busbar_contract::abi::host::conn::connector::{
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome};
 use busbar_contract::abi::mechanism::door::Statement;
-use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::sdk::cred::{self, resolved};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
@@ -156,7 +155,7 @@ fn need_for(request: &Request) -> u32 {
 }
 
 impl Exchange for HostExchange<'_> {
-    fn exchange(&self, _ticket: (u32, u32), request: &Request) -> Exchanged {
+    fn exchange(&self, request: &Request) -> Exchanged {
         let answered = self.op.exchange(need_for(request), None, || {
             Ok(sdk::Request {
                 method: request.method.as_bytes().to_vec(),
@@ -224,19 +223,16 @@ impl Vault {
             .clone()
     }
 
-    /// `resolve` for the op on `ticket` over `exchange` (the op's [`HostExchange`]), over its
+    /// `resolve` for the op over `exchange` (the op's [`HostExchange`]), over its
     /// settings bytes: `None` while the exchange is pending.
     pub fn resolve(
         &self,
         exchange: &dyn Exchange,
-        ticket: Ticket,
         settings: &[u8],
     ) -> Option<SecretResult<Vec<u8>>> {
         match settings_of(settings) {
             Err(e) => Some(Err(e)),
-            Ok(s) => self
-                .client()
-                .resolve(&s, exchange, (ticket.slot, ticket.generation)),
+            Ok(s) => self.client().resolve(&s, exchange),
         }
     }
 }
@@ -279,7 +275,7 @@ impl SafeSlot for Resolve {
         let settings = input.field(|i| &i.settings).bytes();
         let vault = held.life();
         let exchange = HostExchange::new(&instance, held.host());
-        let answered = vault.resolve(&exchange, instance.ticket(), settings);
+        let answered = vault.resolve(&exchange, settings);
         match answered {
             None => Outcome::Pending,
             Some(Ok(material)) => resolved(input, &mut out, cred::Held::new(material)),
