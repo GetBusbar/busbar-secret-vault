@@ -235,3 +235,25 @@ fn a_token_with_a_line_break_is_refused_at_open_and_refresh() {
         assert_eq!(r.text(), Some(text));
     }
 }
+
+/// The cut `HostExchange` applies to the host's reply (the fake host cannot drive a framed
+/// exchange, so the cut is the seam): at the cap the body is whole, one past it is cut to the cap
+/// and the full length is kept for the judge.
+#[test]
+fn the_reply_is_cut_at_the_body_cap() {
+    let cap = crate::MAX_VAULT_RESPONSE_BYTES;
+    for (len, kept) in [(cap, cap), (cap + 1, cap), (3, 3), (0, 0)] {
+        let r = cut_to_cap(
+            sdk::ExchangeResponse {
+                status: 200,
+                body: vec![b'x'; len],
+                ..Default::default()
+            },
+            cap,
+        );
+        assert_eq!((r.status, r.body.len(), r.body_len), (200, kept, len));
+    }
+    // The request's own cap is one past the maximum, so an at-the-maximum reply is never "over".
+    let c = VaultClient::new(&crate::parse_config(SETTINGS).unwrap(), b"tok");
+    assert_eq!(c.request("kv/data/x").unwrap().body_cap, cap + 1);
+}

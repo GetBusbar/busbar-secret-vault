@@ -99,6 +99,11 @@ pub const STATEMENT: Statement = Statement {
 /// The token material `secrets` lends, required non-empty.
 fn token<'a>(secrets: &[&'a [u8]]) -> Result<&'a [u8], String> {
     match secrets.first() {
+        Some(t) if t.iter().any(|b| matches!(b, b'\r' | b'\n')) => Err(format!(
+            "invalid hashicorp-vault plugin config: `{}` resolved to material with a line break \
+             (CR or LF), which cannot be sent as the X-Vault-Token header",
+            crate::TOKEN_KEY
+        )),
         Some(t) if !t.is_empty() => Ok(*t),
         _ => Err(format!(
             "invalid hashicorp-vault plugin config: `{}` resolved to no secret material",
@@ -168,24 +173,27 @@ impl Exchange for HostExchange<'_> {
         match answered {
             std::task::Poll::Pending => Exchanged::Pending,
             std::task::Poll::Ready(Err(e)) => Exchanged::Done(Err(e.to_string())),
-            std::task::Poll::Ready(Ok(mut r)) => {
-                // The body is moved, cut to the cap; what lies past the cap is wiped, and the rest
-                // of the reply with it: no tail is left behind.
-                let body_len = r.body.len();
-                let kept = body_len.min(request.body_cap);
-                r.body[kept..].zeroize();
-                let mut body = std::mem::take(&mut r.body);
-                body.truncate(kept);
-                let response = crate::Response {
-                    status: r.status,
-                    body,
-                    body_len,
-                };
-                r.zeroize();
-                Exchanged::Done(Ok(response))
-            }
+            std::task::Poll::Ready(Ok(r)) => Exchanged::Done(Ok(cut_to_cap(r, request.body_cap))),
         }
     }
+}
+
+/// The exchange's reply as the plugin's [`crate::Response`]: the body is moved, cut to `cap`; what
+/// lies past the cap is wiped, and the rest of the reply with it: no tail is left behind.
+/// `body_len` keeps the full length so the judge can tell "at the cap" from "over it".
+fn cut_to_cap(mut r: sdk::ExchangeResponse, cap: usize) -> crate::Response {
+    let body_len = r.body.len();
+    let kept = body_len.min(cap);
+    r.body[kept..].zeroize();
+    let mut body = std::mem::take(&mut r.body);
+    body.truncate(kept);
+    let response = crate::Response {
+        status: r.status,
+        body,
+        body_len,
+    };
+    r.zeroize();
+    response
 }
 
 /// One instance: the client, swapped whole on `refresh`.
