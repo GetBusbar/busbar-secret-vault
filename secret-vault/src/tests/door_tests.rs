@@ -14,11 +14,6 @@ use busbar_contract::secret::SecretErrorKind;
 use serde_json::json;
 use std::sync::Mutex;
 
-const T: Ticket = Ticket {
-    slot: 1,
-    generation: 1,
-};
-
 /// An exchange answering `status` + `body` after `pends` pending answers.
 struct Scripted {
     status: u16,
@@ -27,7 +22,7 @@ struct Scripted {
 }
 
 impl Exchange for Scripted {
-    fn exchange(&self, _: (u32, u32), _: &Request) -> Exchanged {
+    fn exchange(&self, _: &Request) -> Exchanged {
         let mut p = self.pends.lock().unwrap();
         if *p > 0 {
             *p -= 1;
@@ -51,8 +46,8 @@ struct Rig<E> {
 }
 
 impl<E: Exchange> Rig<E> {
-    fn resolve(&self, ticket: Ticket, settings: &[u8]) -> Option<SecretResult<Vec<u8>>> {
-        self.vault.resolve(&self.exchange, ticket, settings)
+    fn resolve(&self, settings: &[u8]) -> Option<SecretResult<Vec<u8>>> {
+        self.vault.resolve(&self.exchange, settings)
     }
 }
 
@@ -84,17 +79,17 @@ fn reference() -> Vec<u8> {
 #[test]
 fn a_read_answers_the_material() {
     let v = vault(200, OK_BODY, 0);
-    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert_eq!(v.resolve(&reference()).unwrap().unwrap(), b"material");
 }
 
 #[test]
 fn a_refusal_answers_its_kind() {
     let v = vault(403, "denied", 0);
-    let e = v.resolve(T, &reference()).unwrap().unwrap_err();
+    let e = v.resolve(&reference()).unwrap().unwrap_err();
     assert_eq!(error_kind(e.kind), ERROR_KIND_DENIED);
     assert!(!e.message.is_empty(), "a refusal names its reason");
 
-    let e = v.resolve(T, b"[not an object]").unwrap().unwrap_err();
+    let e = v.resolve(b"[not an object]").unwrap().unwrap_err();
     assert_eq!(e.kind, SecretErrorKind::Invalid);
     assert_eq!(error_kind(e.kind), ERROR_KIND_INVALID);
 }
@@ -102,8 +97,8 @@ fn a_refusal_answers_its_kind() {
 #[test]
 fn a_pending_exchange_pends_the_op_and_the_resume_answers() {
     let v = vault(200, OK_BODY, 1);
-    assert!(v.resolve(T, &reference()).is_none(), "pending");
-    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert!(v.resolve(&reference()).is_none(), "pending");
+    assert_eq!(v.resolve(&reference()).unwrap().unwrap(), b"material");
 }
 
 #[test]
@@ -117,8 +112,20 @@ fn open_and_refresh_need_the_token_material() {
         );
     }
     let v = Vault::open(SETTINGS, &[&b"tok"[..]], 1).expect("opens");
-    assert!(v.refresh(b"{}", &[&b"tok"[..]], 2).is_err(), "a bad reload");
-    assert!(v.refresh(SETTINGS, &[], 2).is_err(), "no token");
+    let r = v
+        .refresh(b"{}", &[&b"tok"[..]], 2)
+        .expect_err("a bad reload");
+    assert_eq!(r.outcome(), Outcome::Failed);
+    assert_eq!(
+        r.text(),
+        Some("invalid hashicorp-vault plugin config: missing field `addr` at line 1 column 2")
+    );
+    let r = v.refresh(SETTINGS, &[], 2).expect_err("no token");
+    assert_eq!(r.outcome(), Outcome::Failed);
+    assert_eq!(
+        r.text(),
+        Some("invalid hashicorp-vault plugin config: `token` resolved to no secret material")
+    );
     assert!(v.refresh(SETTINGS, &[&b"tok2"[..]], 2).is_ok());
     assert!(Vault::validate(b"").is_err());
     assert!(Vault::validate(SETTINGS).is_ok());
@@ -137,7 +144,7 @@ struct Recording {
 }
 
 impl Exchange for Recording {
-    fn exchange(&self, _: (u32, u32), r: &Request) -> Exchanged {
+    fn exchange(&self, r: &Request) -> Exchanged {
         let token = r
             .fields
             .iter()
@@ -166,9 +173,9 @@ fn a_refresh_swaps_the_client_and_a_refused_refresh_keeps_it() {
         },
     };
     assert!(v.refresh(SETTINGS, &[&b"tok2"[..]], 2).is_ok());
-    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert_eq!(v.resolve(&reference()).unwrap().unwrap(), b"material");
     assert!(v.refresh(b"{}", &[&b"tok3"[..]], 3).is_err());
-    assert_eq!(v.resolve(T, &reference()).unwrap().unwrap(), b"material");
+    assert_eq!(v.resolve(&reference()).unwrap().unwrap(), b"material");
     assert_eq!(
         *tokens.lock().unwrap(),
         vec![b"tok2".to_vec(), b"tok2".to_vec()]
@@ -205,4 +212,43 @@ fn the_needs_and_the_need_selection() {
         assert_eq!(n.direction, DIRECTION_OUTBOUND);
         assert_eq!(n.keep_mode, KEEP_NAMED);
     }
+}
+
+/// A token with a line break in it can never be sent (the exchange refuses the head field), so it
+/// is refused at open and refresh, naming the setting and the reason, never the value.
+#[test]
+fn a_token_with_a_line_break_is_refused_at_open_and_refresh() {
+    let text = "invalid hashicorp-vault plugin config: `token` resolved to material with a line \
+                break (CR or LF), which cannot be sent as the X-Vault-Token header";
+    let v = Vault::open(SETTINGS, &[&b"tok"[..]], 1).expect("opens");
+    for bad in [&b"ab\ncd"[..], b"ab\r\ncd", b"ab\rcd", b"abcd\n"] {
+        let r = Vault::open(SETTINGS, &[bad], 1).expect_err("a line break is refused");
+        assert_eq!(r.outcome(), Outcome::Failed);
+        assert_eq!(r.text(), Some(text));
+        let r = v.refresh(SETTINGS, &[bad], 2).expect_err("and at refresh");
+        assert_eq!(r.outcome(), Outcome::Failed);
+        assert_eq!(r.text(), Some(text));
+    }
+}
+
+/// The cut `HostExchange` applies to the host's reply (the fake host cannot drive a framed
+/// exchange, so the cut is the seam): at the cap the body is whole, one past it is cut to the cap
+/// and the full length is kept for the judge.
+#[test]
+fn the_reply_is_cut_at_the_body_cap() {
+    let cap = crate::MAX_VAULT_RESPONSE_BYTES;
+    for (len, kept) in [(cap, cap), (cap + 1, cap), (3, 3), (0, 0)] {
+        let r = cut_to_cap(
+            sdk::ExchangeResponse {
+                status: 200,
+                body: vec![b'x'; len],
+                ..Default::default()
+            },
+            cap,
+        );
+        assert_eq!((r.status, r.body.len(), r.body_len), (200, kept, len));
+    }
+    // The request's own cap is one past the maximum, so an at-the-maximum reply is never "over".
+    let c = VaultClient::new(&crate::parse_config(SETTINGS).unwrap(), b"tok");
+    assert_eq!(c.request("kv/data/x").unwrap().body_cap, cap + 1);
 }

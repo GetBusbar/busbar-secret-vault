@@ -60,7 +60,7 @@ struct Moves {
 }
 
 impl Exchange for Moves {
-    fn exchange(&self, _: (u32, u32), _: &Request) -> Exchanged {
+    fn exchange(&self, _: &Request) -> Exchanged {
         let body = self.body.lock().unwrap().take().expect("one exchange");
         let body_len = body.len();
         Exchanged::Done(Ok(Response {
@@ -101,7 +101,7 @@ fn nothing_the_plugin_frees_still_holds_the_token_or_the_value() {
         let client = VaultClient::new(&cfg, TOKEN);
         let material = Zeroizing::new(
             client
-                .resolve(&settings, &exchange, (1, 1))
+                .resolve(&settings, &exchange)
                 .expect("the exchange does not pend")
                 .expect("a 200 with the field"),
         );

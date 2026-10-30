@@ -24,7 +24,6 @@ use busbar_contract::abi::host::conn::connector::{
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome};
 use busbar_contract::abi::mechanism::door::Statement;
-use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::sdk::cred::{self, resolved};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
@@ -99,6 +98,11 @@ pub const STATEMENT: Statement = Statement {
 /// The token material `secrets` lends, required non-empty.
 fn token<'a>(secrets: &[&'a [u8]]) -> Result<&'a [u8], String> {
     match secrets.first() {
+        Some(t) if t.iter().any(|b| matches!(b, b'\r' | b'\n')) => Err(format!(
+            "invalid hashicorp-vault plugin config: `{}` resolved to material with a line break \
+             (CR or LF), which cannot be sent as the X-Vault-Token header",
+            crate::TOKEN_KEY
+        )),
         Some(t) if !t.is_empty() => Ok(*t),
         _ => Err(format!(
             "invalid hashicorp-vault plugin config: `{}` resolved to no secret material",
@@ -151,7 +155,7 @@ fn need_for(request: &Request) -> u32 {
 }
 
 impl Exchange for HostExchange<'_> {
-    fn exchange(&self, _ticket: (u32, u32), request: &Request) -> Exchanged {
+    fn exchange(&self, request: &Request) -> Exchanged {
         let answered = self.op.exchange(need_for(request), None, || {
             Ok(sdk::Request {
                 method: request.method.as_bytes().to_vec(),
@@ -168,24 +172,27 @@ impl Exchange for HostExchange<'_> {
         match answered {
             std::task::Poll::Pending => Exchanged::Pending,
             std::task::Poll::Ready(Err(e)) => Exchanged::Done(Err(e.to_string())),
-            std::task::Poll::Ready(Ok(mut r)) => {
-                // The body is moved, cut to the cap; what lies past the cap is wiped, and the rest
-                // of the reply with it: no tail is left behind.
-                let body_len = r.body.len();
-                let kept = body_len.min(request.body_cap);
-                r.body[kept..].zeroize();
-                let mut body = std::mem::take(&mut r.body);
-                body.truncate(kept);
-                let response = crate::Response {
-                    status: r.status,
-                    body,
-                    body_len,
-                };
-                r.zeroize();
-                Exchanged::Done(Ok(response))
-            }
+            std::task::Poll::Ready(Ok(r)) => Exchanged::Done(Ok(cut_to_cap(r, request.body_cap))),
         }
     }
+}
+
+/// The exchange's reply as the plugin's [`crate::Response`]: the body is moved, cut to `cap`; what
+/// lies past the cap is wiped, and the rest of the reply with it: no tail is left behind.
+/// `body_len` keeps the full length so the judge can tell "at the cap" from "over it".
+fn cut_to_cap(mut r: sdk::ExchangeResponse, cap: usize) -> crate::Response {
+    let body_len = r.body.len();
+    let kept = body_len.min(cap);
+    r.body[kept..].zeroize();
+    let mut body = std::mem::take(&mut r.body);
+    body.truncate(kept);
+    let response = crate::Response {
+        status: r.status,
+        body,
+        body_len,
+    };
+    r.zeroize();
+    response
 }
 
 /// One instance: the client, swapped whole on `refresh`.
@@ -216,19 +223,16 @@ impl Vault {
             .clone()
     }
 
-    /// `resolve` for the op on `ticket` over `exchange` (the op's [`HostExchange`]), over its
+    /// `resolve` for the op over `exchange` (the op's [`HostExchange`]), over its
     /// settings bytes: `None` while the exchange is pending.
     pub fn resolve(
         &self,
         exchange: &dyn Exchange,
-        ticket: Ticket,
         settings: &[u8],
     ) -> Option<SecretResult<Vec<u8>>> {
         match settings_of(settings) {
             Err(e) => Some(Err(e)),
-            Ok(s) => self
-                .client()
-                .resolve(&s, exchange, (ticket.slot, ticket.generation)),
+            Ok(s) => self.client().resolve(&s, exchange),
         }
     }
 }
@@ -271,7 +275,7 @@ impl SafeSlot for Resolve {
         let settings = input.field(|i| &i.settings).bytes();
         let vault = held.life();
         let exchange = HostExchange::new(&instance, held.host());
-        let answered = vault.resolve(&exchange, instance.ticket(), settings);
+        let answered = vault.resolve(&exchange, settings);
         match answered {
             None => Outcome::Pending,
             Some(Ok(material)) => resolved(input, &mut out, cred::Held::new(material)),

@@ -59,7 +59,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 pub mod door;
 
-/// The plugin's name (the manifest name) and the `module` alias a reference spells.
+/// The plugin's name: the Statement's and the manifest's. (The `module` alias a reference spells is
+/// `vault`.)
 pub const NAME: &str = "busbar-secret-vault";
 
 /// Upper bound on a Vault KV v2 response body: generous headroom over a handful of short fields,
@@ -89,7 +90,8 @@ pub struct VaultConfig {
     /// host as the need's `trust_from`.
     #[serde(default)]
     pub ca_cert_pem: Option<String>,
-    /// HTTP timeout (connect + total), in seconds. Default 10.
+    /// HTTP timeout (connect + total), in seconds. Default 10. The host bounds every resolve by its
+    /// 30 s call deadline, so a larger value cannot extend it.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
 }
@@ -107,8 +109,9 @@ impl std::fmt::Debug for VaultConfig {
 
 /// Parse the open-time settings bytes: an empty (or whitespace-only)
 /// config and a malformed one are refused, naming the plugin. Then each value is judged, so
-/// `validate`, `open` and `refresh` refuse what could never serve, naming the key and never
-/// quoting its value: an `addr` that is not an `http://` or `https://` URL naming a host (or that
+/// `validate`, `open` and `refresh` refuse what could never serve, naming the key (the texts
+/// this crate words never quote a value; a JSON type error from `serde_json` can quote the
+/// offending, non-secret value): an `addr` that is not an `http://` or `https://` URL naming a host (or that
 /// carries a query or fragment, which the request URL cannot carry), a `ca_cert_pem` holding no PEM
 /// certificate, and a `timeout_secs` of 0.
 ///
@@ -133,15 +136,7 @@ pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
         );
     }
     if let Some(pem) = &cfg.ca_cert_pem {
-        let begin = pem.find("-----BEGIN CERTIFICATE-----");
-        let end = pem.find("-----END CERTIFICATE-----");
-        if !matches!((begin, end), (Some(b), Some(e)) if b < e) {
-            return Err(
-                "invalid hashicorp-vault plugin config: `ca_cert_pem` holds no PEM \
-                        certificate (-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----)"
-                    .to_string(),
-            );
-        }
+        check_ca_cert_pem(pem)?;
     }
     if cfg.timeout_secs == 0 {
         return Err(
@@ -149,6 +144,99 @@ pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
         );
     }
     Ok(cfg)
+}
+
+const PEM_BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+const PEM_END: &str = "-----END CERTIFICATE-----";
+
+/// Judge a `ca_cert_pem`: it must hold a PEM certificate, and every CERTIFICATE block must decode
+/// (1.5.5 refused what `reqwest::Certificate::from_pem` could not read, and the host does not judge
+/// a trust anchor at open): its body is valid base64 and its DER is one SEQUENCE of exactly the
+/// stated length.
+fn check_ca_cert_pem(pem: &str) -> Result<(), String> {
+    let no_cert = || {
+        "invalid hashicorp-vault plugin config: `ca_cert_pem` holds no PEM certificate \
+         (-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----)"
+            .to_string()
+    };
+    let mut rest = pem;
+    let mut n = 0usize;
+    while let Some(b) = rest.find(PEM_BEGIN) {
+        let after = &rest[b + PEM_BEGIN.len()..];
+        let Some(e) = after.find(PEM_END) else {
+            break;
+        };
+        n += 1;
+        let refuse = |why: &str| {
+            format!(
+                "invalid hashicorp-vault plugin config: invalid ca_cert_pem: certificate {n} {why}"
+            )
+        };
+        let der = decode_base64(&after[..e]).ok_or_else(|| refuse("is not valid base64"))?;
+        if !is_der_sequence(&der) {
+            return Err(refuse(
+                "is not DER (it does not start with a SEQUENCE of the stated length)",
+            ));
+        }
+        rest = &after[e + PEM_END.len()..];
+    }
+    if n == 0 {
+        return Err(no_cert());
+    }
+    Ok(())
+}
+
+/// Strict standard-alphabet base64 (whitespace ignored): padding only at the end and only as needed,
+/// no stray bytes, no non-zero trailing bits. `None` when it is not, or decodes to nothing.
+fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let symbols: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if symbols.is_empty() || !symbols.len().is_multiple_of(4) {
+        return None;
+    }
+    let pad = symbols.iter().rev().take_while(|&&b| b == b'=').count();
+    if pad > 2 {
+        return None;
+    }
+    let data = &symbols[..symbols.len() - pad];
+    let mut out = Vec::with_capacity(data.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for &b in data {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    (acc == 0).then_some(out)
+}
+
+/// Whether `der` is exactly one DER SEQUENCE: tag 0x30, a definite length (short form, or long form
+/// of at most four bytes) that accounts for every byte after the header.
+fn is_der_sequence(der: &[u8]) -> bool {
+    let [0x30, first, tail @ ..] = der else {
+        return false;
+    };
+    if *first < 0x80 {
+        return tail.len() == usize::from(*first);
+    }
+    let n = usize::from(*first & 0x7F);
+    if n == 0 || n > 4 || tail.len() < n {
+        return false;
+    }
+    let len = tail[..n]
+        .iter()
+        .fold(0usize, |l, &b| (l << 8) | usize::from(b));
+    tail.len() - n == len
 }
 
 /// Whether `addr` (its userinfo aside, which is stripped as a credential) is an absolute `http` or
@@ -221,7 +309,9 @@ pub fn parse_reference(
 }
 
 /// ONE framed http request, as the plugin hands it to the host's exchange. The token rides as a
-/// head field; `Debug` never prints field values, and dropping the request zeroizes them.
+/// head field; `Debug` never prints field values. The fields are clones of the client's token (`Arc`),
+/// so the token is wiped when the client (and every request still holding it) drops, not when one
+/// request does.
 pub struct Request {
     /// The method (`GET`).
     pub method: &'static str,
@@ -295,12 +385,13 @@ pub enum Exchanged {
     Done(Result<Response, String>),
 }
 
-/// The host's framed one-shot http exchange, as the plugin sees it. `ticket` names the op: a
-/// re-invoked op asking again on the same ticket receives the stored result, never a second
-/// request.
+/// The host's framed one-shot http exchange, as the plugin sees it: the seam
+/// [`door::HostExchange`] implements in production and tests stand in for. Re-serving a stored
+/// result to a re-invoked op is the SDK `Op`'s job (it holds the parked exchange on the op's
+/// ticket), not this trait's.
 pub trait Exchange {
-    /// Run (or collect) the exchange for `ticket`.
-    fn exchange(&self, ticket: (u32, u32), request: &Request) -> Exchanged;
+    /// Run (or collect) the exchange.
+    fn exchange(&self, request: &Request) -> Exchanged;
 }
 
 /// The Vault client: the resolved `addr`, the token material and the transport settings, built
@@ -348,7 +439,7 @@ impl VaultClient {
     pub fn request(&self, vault_path: &str) -> SecretResult<Request> {
         let url = self.url(vault_path);
         let encoded = encode_path(vault_path.trim_start_matches('/'));
-        let target = format!("{}/v1/{encoded}", self.addr)
+        let target = normalise_url_path(&format!("{}/v1/{encoded}", self.addr))
             .parse::<http::Uri>()
             .map_err(|e| e.to_string())
             .and_then(|u| {
@@ -374,13 +465,11 @@ impl VaultClient {
         })
     }
 
-    /// Resolve `settings` (a reference) through `exchange` for the op on `ticket`: `None` while
-    /// the exchange is pending.
+    /// Resolve `settings` (a reference) through `exchange`: `None` while the exchange is pending.
     pub fn resolve(
         &self,
         settings: &serde_json::Map<String, serde_json::Value>,
         exchange: &dyn Exchange,
-        ticket: (u32, u32),
     ) -> Option<SecretResult<Vec<u8>>> {
         let (path, field) = match parse_reference(settings) {
             Ok(r) => r,
@@ -390,7 +479,7 @@ impl VaultClient {
             Ok(r) => r,
             Err(e) => return Some(Err(e)),
         };
-        match exchange.exchange(ticket, &request) {
+        match exchange.exchange(&request) {
             Exchanged::Pending => None,
             Exchanged::Done(result) => Some(judge(&path, &field, &request.url, result)),
         }
@@ -429,6 +518,50 @@ fn encode_path(path: &str) -> String {
         }
     }
     out
+}
+
+/// `url` as the `url` crate (WHATWG, special scheme) writes its path, which is how 1.5.5 built the
+/// request URL from `{addr}/v1/{path}`: `\` is `/`, a `.` segment (or `%2e`, any case) is dropped,
+/// a `..` segment (`.%2e`, `%2e.`, `%2e%2e`) removes the segment before it and never climbs above
+/// the root, and a trailing `.`/`..` leaves a trailing `/`. The `addr` prefix and `/v1` are
+/// segments like any other, so a leading `..` in the operator's path pops them. The query is left
+/// alone.
+fn normalise_url_path(url: &str) -> String {
+    let path_start = url
+        .find("://")
+        .and_then(|i| url[i + 3..].find('/').map(|j| i + 3 + j));
+    let Some(start) = path_start else {
+        return url.to_string();
+    };
+    let (origin, rest) = url.split_at(start);
+    let (path, query) = match rest.find('?') {
+        Some(q) => rest.split_at(q),
+        None => (rest, ""),
+    };
+    let path = path.replace('\\', "/");
+    let is_dots = |seg: &str, n: usize| {
+        let lower = seg.to_ascii_lowercase();
+        let dots = lower.replace("%2e", ".");
+        dots == ".".repeat(n)
+    };
+    let mut segments: Vec<&str> = Vec::new();
+    let all: Vec<&str> = path[1..].split('/').collect();
+    for (i, seg) in all.iter().enumerate() {
+        let last = i + 1 == all.len();
+        if is_dots(seg, 2) {
+            segments.pop();
+            if last {
+                segments.push("");
+            }
+        } else if is_dots(seg, 1) {
+            if last {
+                segments.push("");
+            }
+        } else {
+            segments.push(seg);
+        }
+    }
+    format!("{origin}/{}{query}", segments.join("/"))
 }
 
 /// `http`'s status rendering (`"404 Not Found"`).

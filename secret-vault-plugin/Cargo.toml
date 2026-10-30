@@ -4,7 +4,7 @@ name = "busbar-secret-vault-plugin"
 version = "1.6.0"
 publish = false            # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
 edition = "2021"
-rust-version = "1.97"
+rust-version.workspace = true
 description = "The HashiCorp Vault secret backend as a droppable busbar plugin: a cdylib exporting the secret kind's door. Drop it in the plugins folder, add secrets.<alias>.settings: { addr, token }, and reference secrets as { module: <alias>, settings: { path: \"kv/data/name#field\" } }."
 license = "Apache-2.0"
 
@@ -43,3 +43,6 @@ busbar-transport-tcp = { workspace = true }
 busbar-transport-http = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true
