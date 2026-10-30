@@ -939,3 +939,167 @@ fn debug_of_a_response_or_the_config_carries_no_secret() {
     }
     assert!(format!("{c:?}").contains("vault:8200"));
 }
+
+// ── audit fixes: the trust anchor, the URL, the pins ────────────────────────────────────────────
+
+/// A real self-signed P-256 certificate (CN=t, valid 100 years), for the `ca_cert_pem` checks.
+const REAL_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBTDCB9KADAgECAhRAv5nU49XDV1DnMZdBVXBuEWTXtzAKBggqhkjOPQQDAjAM
+MQowCAYDVQQDDAF0MCAXDTI2MTAzMDE5MzMwM1oYDzIxMjYxMDA2MTkzMzAzWjAM
+MQowCAYDVQQDDAF0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE5y86jWjKK0R/
+sCwiSIabwEb+d/HiJLRhIJszyGqjC+ul+AXCv/c3kq3cbDEEl1Pt4EZHP31v8ev6
+p8BJC+aaSKMyMDAwHQYDVR0OBBYEFPnMBJuKHy7JwH2V1+noptWAYwvTMA8GA1Ud
+EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIgVyP4/oiNsc6El0BALXr5Evll
+YbRfJC7nZIlBGtV3LlwCIAllcUEmL/eYJCDkqXthgpUzPI7QC2pKhPQTsHaBbvvf
+-----END CERTIFICATE-----
+";
+
+fn config_with_ca(pem: &str) -> Result<VaultConfig, String> {
+    let cfg = json!({ "addr": "https://v", "token": { "env": "T" }, "ca_cert_pem": pem });
+    parse_config(cfg.to_string().as_bytes())
+}
+
+/// 1.5.5 refused a trust anchor `reqwest::Certificate::from_pem` could not decode ("invalid
+/// ca_cert_pem: ..."); the host only audits a bad one and never calls `ready` for a secret, so the
+/// plugin judges it: markers around junk, or base64 that is not DER, are refused.
+#[test]
+fn a_ca_cert_pem_that_does_not_decode_is_refused() {
+    let junk = "-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----";
+    assert_eq!(
+        config_with_ca(junk).unwrap_err(),
+        "invalid hashicorp-vault plugin config: invalid ca_cert_pem: certificate 1 is not valid \
+         base64"
+    );
+    // "hello world!" in base64: valid base64, not DER.
+    let not_der = "-----BEGIN CERTIFICATE-----\naGVsbG8gd29ybGQh\n-----END CERTIFICATE-----";
+    assert_eq!(
+        config_with_ca(not_der).unwrap_err(),
+        "invalid hashicorp-vault plugin config: invalid ca_cert_pem: certificate 1 is not DER (it \
+         does not start with a SEQUENCE of the stated length)"
+    );
+    // A SEQUENCE whose stated length is longer than what follows: truncated DER.
+    let truncated = "-----BEGIN CERTIFICATE-----\nMAUBAQ==\n-----END CERTIFICATE-----";
+    assert!(config_with_ca(truncated).is_err(), "truncated DER");
+    // A good block followed by a bad one: the bad one is named by its position.
+    let second =
+        format!("{REAL_CERT_PEM}-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----");
+    assert!(config_with_ca(&second)
+        .unwrap_err()
+        .contains("certificate 2"));
+    let empty = "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----";
+    assert!(config_with_ca(empty).is_err(), "an empty block");
+}
+
+#[test]
+fn a_real_certificate_is_accepted_alone_and_in_a_bundle() {
+    assert!(config_with_ca(REAL_CERT_PEM).is_ok());
+    assert!(config_with_ca(&format!("{REAL_CERT_PEM}{REAL_CERT_PEM}")).is_ok());
+    // CRLF line endings and leading text are whitespace/comment to a PEM reader.
+    let crlf = format!("subject: t\r\n{}", REAL_CERT_PEM.replace('\n', "\r\n"));
+    assert!(config_with_ca(&crlf).is_ok());
+}
+
+#[test]
+fn an_end_marker_before_the_begin_marker_is_refused() {
+    let reversed = "-----END CERTIFICATE-----\nMAA=\n-----BEGIN CERTIFICATE-----";
+    assert_eq!(
+        config_with_ca(reversed).unwrap_err(),
+        "invalid hashicorp-vault plugin config: `ca_cert_pem` holds no PEM certificate \
+         (-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----)"
+    );
+}
+
+/// 1.5.5 parsed `{addr}/v1/{path}` with the `url` crate, which removes dot segments and turns `\`
+/// into `/` in an http(s) path; the target is the same.
+#[test]
+fn the_framed_target_normalises_the_path_as_the_url_crate_did() {
+    let c = VaultClient::new(&cfg("https://v:8200"), TOKEN);
+    let target = |p: &str| c.request(p).unwrap().target;
+    assert_eq!(target("kv/data/team/../openai"), "/v1/kv/data/openai");
+    assert_eq!(target("kv/./data/x"), "/v1/kv/data/x");
+    assert_eq!(target("kv\\data\\x"), "/v1/kv/data/x");
+    assert_eq!(target("kv/%2e/data/%2E%2e/x"), "/v1/kv/x");
+    assert_eq!(target("kv/data/x/."), "/v1/kv/data/x/");
+    assert_eq!(target("kv/data/.."), "/v1/kv/");
+    // The query is data, not path.
+    assert_eq!(target("kv/data/x?p=/../y"), "/v1/kv/data/x?p=/../y");
+    // 1.5.5 parsed `/v1/` as part of the same URL, so a leading `..` pops `v1`, and none climbs
+    // above the root.
+    assert_eq!(target("../x"), "/x");
+    assert_eq!(target("../../../x"), "/x");
+    // The same under an `addr` prefix: the prefix is poppable too.
+    let c = VaultClient::new(&cfg("https://v:8200/prefix/"), TOKEN);
+    assert_eq!(c.request("kv/../x").unwrap().target, "/prefix/v1/x");
+    assert_eq!(c.request("../../x").unwrap().target, "/x");
+    // The display URL stays the raw form.
+    assert_eq!(
+        c.request("kv/../x").unwrap().url,
+        "https://v:8200/prefix/v1/kv/../x"
+    );
+}
+
+#[test]
+fn encode_path_writes_every_byte_a_uri_cannot_hold() {
+    assert_eq!(encode_path("\"{}"), "%22%7B%7D");
+    assert_eq!(encode_path("a\u{7f}b"), "a%7Fb");
+    assert_eq!(encode_path("a\u{1}b\tc"), "a%01b%09c");
+    assert_eq!(encode_path("a b#c<d>e`f"), "a%20b%23c%3Cd%3Ee%60f");
+    assert_eq!(encode_path("a/b?c=%20&d"), "a/b?c=%20&d");
+}
+
+#[test]
+fn a_reference_splits_on_the_last_hash_and_refuses_an_empty_path() {
+    let (p, f) = parse_reference(&settings(json!({ "path": "kv/data/a#b#c" }))).unwrap();
+    assert_eq!((p.as_str(), f.as_str()), ("kv/data/a#b", "c"));
+    let e = parse_reference(&settings(json!({ "path": "#k" }))).unwrap_err();
+    assert_eq!(e.kind, SecretErrorKind::Invalid);
+}
+
+/// Every 3xx is the redirect refusal (and says why), 599 is still a server error and 600 is not;
+/// a 2xx other than 200 is judged by its body like a 200.
+#[test]
+fn status_classes_are_judged_at_their_edges() {
+    for s in [301, 302, 303, 308] {
+        let e = run(
+            &Canned::status(s, ""),
+            json!({ "path": "kv/data/openai#k" }),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, SecretErrorKind::Internal, "{s}");
+        assert!(
+            e.message.contains("a redirect is not followed; set `addr`"),
+            "{s}: {}",
+            e.message
+        );
+    }
+    let e = run(
+        &Canned::status(599, ""),
+        json!({ "path": "kv/data/openai#k" }),
+    )
+    .unwrap_err();
+    assert_eq!(e.kind, SecretErrorKind::Unavailable);
+    assert!(e.message.contains("Vault server error"), "{}", e.message);
+    let e = run(
+        &Canned::status(600, ""),
+        json!({ "path": "kv/data/openai#k" }),
+    )
+    .unwrap_err();
+    assert_eq!(e.kind, SecretErrorKind::Internal);
+    assert!(!e.message.contains("server error"), "{}", e.message);
+    for s in [200, 201] {
+        let ok = Canned::status(s, &kv2(json!({ "k": "v" })));
+        assert_eq!(
+            run(&ok, json!({ "path": "kv/data/openai#k" })).unwrap(),
+            b"v",
+            "{s}"
+        );
+    }
+    // A 204 carries no body: it is judged as a success-shaped reply and fails on the missing JSON.
+    let e = run(
+        &Canned::status(204, ""),
+        json!({ "path": "kv/data/openai#k" }),
+    )
+    .unwrap_err();
+    assert_eq!(e.kind, SecretErrorKind::Internal);
+    assert!(e.message.contains("is not valid JSON"), "{}", e.message);
+}

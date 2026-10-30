@@ -117,8 +117,20 @@ fn open_and_refresh_need_the_token_material() {
         );
     }
     let v = Vault::open(SETTINGS, &[&b"tok"[..]], 1).expect("opens");
-    assert!(v.refresh(b"{}", &[&b"tok"[..]], 2).is_err(), "a bad reload");
-    assert!(v.refresh(SETTINGS, &[], 2).is_err(), "no token");
+    let r = v
+        .refresh(b"{}", &[&b"tok"[..]], 2)
+        .expect_err("a bad reload");
+    assert_eq!(r.outcome(), Outcome::Failed);
+    assert_eq!(
+        r.text(),
+        Some("invalid hashicorp-vault plugin config: missing field `addr` at line 1 column 2")
+    );
+    let r = v.refresh(SETTINGS, &[], 2).expect_err("no token");
+    assert_eq!(r.outcome(), Outcome::Failed);
+    assert_eq!(
+        r.text(),
+        Some("invalid hashicorp-vault plugin config: `token` resolved to no secret material")
+    );
     assert!(v.refresh(SETTINGS, &[&b"tok2"[..]], 2).is_ok());
     assert!(Vault::validate(b"").is_err());
     assert!(Vault::validate(SETTINGS).is_ok());
@@ -204,5 +216,22 @@ fn the_needs_and_the_need_selection() {
         assert_eq!(n.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE);
         assert_eq!(n.direction, DIRECTION_OUTBOUND);
         assert_eq!(n.keep_mode, KEEP_NAMED);
+    }
+}
+
+/// A token with a line break in it can never be sent (the exchange refuses the head field), so it
+/// is refused at open and refresh, naming the setting and the reason, never the value.
+#[test]
+fn a_token_with_a_line_break_is_refused_at_open_and_refresh() {
+    let text = "invalid hashicorp-vault plugin config: `token` resolved to material with a line \
+                break (CR or LF), which cannot be sent as the X-Vault-Token header";
+    let v = Vault::open(SETTINGS, &[&b"tok"[..]], 1).expect("opens");
+    for bad in [&b"ab\ncd"[..], b"ab\r\ncd", b"ab\rcd", b"abcd\n"] {
+        let r = Vault::open(SETTINGS, &[bad], 1).expect_err("a line break is refused");
+        assert_eq!(r.outcome(), Outcome::Failed);
+        assert_eq!(r.text(), Some(text));
+        let r = v.refresh(SETTINGS, &[bad], 2).expect_err("and at refresh");
+        assert_eq!(r.outcome(), Outcome::Failed);
+        assert_eq!(r.text(), Some(text));
     }
 }
