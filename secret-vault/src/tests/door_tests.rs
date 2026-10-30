@@ -135,7 +135,7 @@ fn open_and_refresh_need_the_token_material() {
 fn the_statement_names_the_plugin_and_its_token_reference() {
     assert_eq!(STATEMENT.secret_refs_len, 1);
     assert_eq!(STATEMENT.name.len, crate::NAME.len());
-    assert_eq!(STATEMENT.max_inflight, 64);
+    assert_eq!(STATEMENT.max_inflight, 16);
 }
 
 /// Records the `X-Vault-Token` of each request it answers.

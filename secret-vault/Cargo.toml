@@ -5,7 +5,7 @@ version = "1.6.0"
 publish = false            # linked into busbar at a pinned rev, or shipped as a signed tarball; never to crates.io
 edition = "2021"
 rust-version.workspace = true
-description = "The HashiCorp Vault backend for busbar's kind:secret plugin on the secret kind's memory ABI: reads a field out of a Vault KV v2 secret through the host's http exchange, authenticating with the kernel-resolved X-Vault-Token."
+description = "The HashiCorp Vault source for busbar's kind:secret plugin family, on the secret kind's memory ABI: reads a field out of a Vault KV v2 secret through the host's http exchange, authenticating with the kernel-resolved X-Vault-Token."
 license = "Apache-2.0"
 
 [lib]

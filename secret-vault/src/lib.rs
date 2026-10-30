@@ -63,6 +63,10 @@ pub mod door;
 /// `vault`.)
 pub const NAME: &str = "busbar-secret-vault";
 
+/// The word config names this source by: its module alias, spelled here so a linked build answers
+/// it as the dropped-in one does (a linked row takes no manifest alias).
+pub const WORD: &str = "vault";
+
 /// Upper bound on a Vault KV v2 response body: generous headroom over a handful of short fields,
 /// while bounding the allocation against a hostile or misbehaving endpoint.
 pub const MAX_VAULT_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -721,4 +725,5 @@ fn render(v: &serde_json::Value) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[path = "tests/lib_tests.rs"]
 mod tests;

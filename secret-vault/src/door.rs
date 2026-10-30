@@ -23,7 +23,7 @@ use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome};
-use busbar_contract::abi::mechanism::door::Statement;
+use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
 use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::sdk::cred::{self, resolved};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
@@ -85,14 +85,30 @@ const fn need(trust_from: AbiStr) -> Need {
 /// over the first.
 const NEEDS: &[Need] = &[need(NONE), need(abi_str(TRUST_FROM))];
 
-/// This plugin's Statement: its name, version, the most resolves one instance holds in flight, the
-/// token as its one secret reference, and its needs.
+/// A rewrite naming this source by its word ([`crate::WORD`]), in `class`, carrying `to`.
+const fn rewrite(class: u32, to: &'static str) -> Rewrite {
+    Rewrite {
+        class,
+        _reserved: 0,
+        from: abi_str(crate::WORD),
+        to: abi_str(to),
+    }
+}
+
+/// The names config gives this source: its module alias (`module: vault`). It has no shorthand.
+const REWRITES: &[Rewrite] = &[rewrite(REWRITE_ALIAS, "")];
+
+/// This plugin's Statement: its name, version, the most resolves one instance holds in flight (the
+/// host clamps a secret instance to 16), the token as its one secret reference, its needs, and the
+/// names config gives it.
 pub const STATEMENT: Statement = Statement {
+    rewrites: REWRITES.as_ptr(),
+    rewrites_len: REWRITES.len(),
     secret_refs: SECRET_REFS.as_ptr(),
     secret_refs_len: SECRET_REFS.len(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
-    ..statement(crate::NAME, env!("CARGO_PKG_VERSION"), 64)
+    ..statement(crate::NAME, env!("CARGO_PKG_VERSION"), 16)
 };
 
 /// The token material `secrets` lends, required non-empty.
@@ -294,7 +310,7 @@ mod table {
 }
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
-pub use table::door;
+pub use table::{door, MACRO_DOOR};
 
 #[cfg(test)]
 #[path = "tests/door_tests.rs"]
