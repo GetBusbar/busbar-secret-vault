@@ -12,10 +12,6 @@ The HashiCorp Vault secret backend as a droppable busbar plugin: a cdylib export
 
 ## What it is for
 
-[![Release](https://img.shields.io/github/v/release/GetBusbar/busbar-secret-vault)](https://github.com/GetBusbar/busbar-secret-vault/releases)
-[![Coverage](https://codecov.io/gh/GetBusbar/busbar-secret-vault/branch/dev/graph/badge.svg)](https://codecov.io/gh/GetBusbar/busbar-secret-vault)
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-
 The first-party, signed `kind: secret` plugin for
 [busbar](https://getbusbar.com): resolves a config secret **reference**
 against a real [HashiCorp Vault](https://www.vaultproject.io) KV v2
@@ -40,9 +36,9 @@ explicitly in production; do not assume they move together.
 
 Every secret value in busbar's config — a provider `api_key`,
 `auth.signing_key`, the admin token, a TLS `cert`/`key`/`client_ca` — is a
-secret **reference**, not a literal. The two built-in reference forms
-(`{ env: VAR }` and `{ file: /path }`) need no plugin. This plugin adds a
-third form, `{ module: vault, settings: {...} }`, so a reference resolves
+secret **reference**, not a literal. The `{ env: VAR }` and `{ file: /path }` reference
+forms are the env and file secret plugins busbar links in its default build.
+This plugin adds a third form, `{ module: vault, settings: {...} }`, so a reference resolves
 from a real Vault server through the same signed-plugin trust pipeline —
 the plugin you reach for when key material must never sit in an env var
 or an on-disk file.
