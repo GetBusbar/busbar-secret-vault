@@ -1,7 +1,6 @@
-# Contributing to hashicorp-vault
+# Contributing to busbar-secret-vault
 
-Thanks for your interest in improving `hashicorp-vault`. This document covers how
-to build, test, and submit changes.
+Thanks for your interest in improving `busbar-secret-vault`.
 
 ## Ground rules
 
@@ -11,69 +10,39 @@ to build, test, and submit changes.
   [Apache-2.0](LICENSE) license.
 - Security issues go through [SECURITY.md](SECURITY.md), **not** public issues.
 
-## Development setup
+## Layout
 
-`hashicorp-vault` is a Rust `cdylib` plugin. You need a recent stable toolchain
-(`rustup` recommended), and — until [busbarAI](https://github.com/GetBusbar/busbarAI)
-ships publicly — a sibling checkout of it at `../busbarAI`, since this crate's
-`Cargo.toml` points at busbar's crates as local path dependencies. See the
-README's [Dependencies](README.md#dependencies) section for the exact layout;
-CI checks out `GetBusbar/busbar` at the branch named in
-[`ci.yml`](.github/workflows/ci.yml)'s `busbar_ref` input to the same place.
+Every busbar plugin repo has the same skeleton. This one is a two-crate Cargo workspace: `secret-vault/` holds the plugin's logic and `secret-vault-plugin/` is the thin `cdylib` that packages it as a droppable `kind: secret` plugin. busbar itself is a git dependency
+pinned to the commit in `.busbar-ref`. The CI, release, dependency and lint configuration
+are rendered by `busbar-release plugin heal` from the fleet template (GetBusbar/busbar-release
+`template/`), [busbar's plugin registry](https://github.com/GetBusbar/busbar/blob/main/plugins.yaml)
+and busbar's dependency policy (`.github/fleet/deps.toml` and the root `[workspace.dependencies]`
+at the pin); change them there, not here.
 
-The end-to-end test needs a real Vault dev-mode server:
+## This repo tests itself against busbar
 
-```bash
-docker run --rm -p 8200:8200 --cap-add=IPC_LOCK -e VAULT_DEV_ROOT_TOKEN_ID=root hashicorp/vault
-```
+CI calls busbar's reusable `plugin-ci.yml` at the commit in `.busbar-ref`. It runs formatting,
+strict Clippy, dependency checks and this repository's ordinary Rust tests. The tests load the
+actual linked door and the freshly built library through the public plugin loader. CI exports the
+absolute library path as `BUSBAR_PLUGIN_CDYLIB`; a missing library fails the tests.
 
-```bash
-cargo build --release                       # cdylib
-BUSBAR_TEST_VAULT_ADDR=http://127.0.0.1:8200 BUSBAR_TEST_VAULT_TOKEN=root cargo test
-cargo clippy --all-targets -- -D warnings    # lints must be clean
-cargo fmt --all -- --check                   # format before committing
-```
+Keep product assertions in this repository. Exercise both actual loading paths and retain negative
+cases that distinguish a refused input or failed operation from success. There is no shared kind
+script or generated host adapter. Configure any real service backends and existing test-only
+features in this repository's registry entry; test-image features do not change production builds.
 
-Without a running Vault, `cargo test` still runs every hermetic unit test; the
-end-to-end test in `hashicorp-vault-plugin/tests/e2e.rs` self-skips locally with a
-message (it hard-fails instead of skipping under CI — see the README's
-[Tests](README.md#tests) section).
+The plugin keeps its own `Cargo.lock`. Heal seeds its resolution from busbar's lock at the pin;
+this does not make the two complete dependency graphs or every resolved version identical.
 
 ## Before you open a pull request
 
-1. **`cargo fmt --all`** — code must be rustfmt-clean.
-2. **`cargo clippy --all-targets -- -D warnings`** — no warnings.
-3. **`cargo build && cargo test`** (against a real local Vault, see above) — green,
-   including the end-to-end `dlopen`/Vault test in `hashicorp-vault-plugin/tests/e2e.rs`
-   — it must never be allowed to quietly skip under CI.
-4. Add or update tests for any behavior change.
-5. Update documentation (`README.md`, doc comments) when you change behavior or config.
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --release --locked -p busbar-secret-vault-plugin --lib
+BUSBAR_PLUGIN_CDYLIB="$PWD/target/release/libbusbar_secret_vault_plugin.so" cargo test --release --workspace --locked
+```
 
-## Architecture
-
-This repo is a 2-crate workspace, not a thin adapter reaching back into busbarAI
-for its real logic:
-
-- `hashicorp-vault/` (crate `busbar-hashicorp-vault`) — the real Vault KV v2 HTTP
-  client: field addressing, response-size capping, error classification.
-  Most substantive Vault-logic changes belong here.
-- `hashicorp-vault-plugin/` (crate `busbar-hashicorp-vault-plugin`) — the thin
-  `cdylib` adapter: turns the engine's JSON config into a `VaultConfig`/
-  `VaultSecretModule` (from the sibling `hashicorp-vault` crate) and hands the
-  trait object to
-  [`busbar-plugin-sdk`](https://github.com/GetBusbar/busbarAI/tree/main/crates/plugin-sdk),
-  which emits the C ABI symbols the loader resolves.
-
-Changes to the ABI-crossing seam (`hashicorp-vault-plugin/src/lib.rs`) deserve
-extra care: it hands real secret material back across the plugin ABI.
-
-## Commit & PR conventions
-
-- Keep commits focused; squash noisy WIP commits before opening the PR.
-- Write a clear PR description: what changed, why, and how it was verified.
-- Reference any related issue.
-- Stage files by name; avoid sweeping `git add -A` that pulls in unrelated changes.
-
-## Questions
-
-Open a discussion or issue. We're happy to help you get oriented.
+The README's Tests section names any live backend the full suite needs. Add or update
+tests for any behavior change, and update the README when you change behavior or
+config. Keep commits focused and describe what changed, why, and how it was verified.
