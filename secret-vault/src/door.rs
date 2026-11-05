@@ -98,10 +98,15 @@ const fn rewrite(class: u32, to: &'static str) -> Rewrite {
 /// The names config gives this source: its module alias (`module: vault`). It has no shorthand.
 const REWRITES: &[Rewrite] = &[rewrite(REWRITE_ALIAS, "")];
 
+/// The settings accepted by this plugin's lifecycle parser.
+const SETTINGS_SCHEMA: busbar_contract::abi::mechanism::call::Blob =
+    busbar_contract::abi::mechanism::call::Blob::json(include_bytes!("settings.schema.json"));
+
 /// This plugin's Statement: its name, version, the most resolves one instance holds in flight (the
 /// host clamps a secret instance to 16), the token as its one secret reference, its needs, and the
 /// names config gives it.
 pub const STATEMENT: Statement = Statement {
+    settings_schema: SETTINGS_SCHEMA,
     rewrites: REWRITES.as_ptr(),
     rewrites_len: REWRITES.len(),
     secret_refs: SECRET_REFS.as_ptr(),
@@ -374,3 +379,7 @@ pub use table::{door, MACRO_DOOR};
 #[cfg(test)]
 #[path = "tests/door_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "settings_schema_tests.rs"]
+mod settings_schema_tests;

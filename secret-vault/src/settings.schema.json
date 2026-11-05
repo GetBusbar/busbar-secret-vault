@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "addr",
+    "token"
+  ],
+  "properties": {
+    "addr": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "HTTP(S) Vault server URL with a host, no query or fragment. The lifecycle parser additionally validates URL syntax. URL syntax and supported schemes are checked by the lifecycle parser after this structural schema."
+    },
+    "token": {
+      "writeOnly": true,
+      "description": "Required token reference, supplied as any JSON value to validate; open separately requires non-empty resolved token bytes without forbidden HTTP control characters. This describes lifecycle parsing; the host validates secret-reference syntax and resolves material separately.",
+      "x-busbar-secret": true
+    },
+    "ca_cert_pem": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Additional CA certificates, or null. When a string, the lifecycle parser requires at least one well-formed PEM CERTIFICATE with valid base64 and DER sequence length."
+    },
+    "timeout_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615,
+      "default": 10,
+      "description": "HTTP timeout in seconds; the host call deadline still bounds a resolve. Fractional or exponent JSON number spellings are refused.",
+      "x-busbar-integer-token": "unsigned"
+    }
+  },
+  "x-busbar-settings-profile": "integer-token-v1"
+}

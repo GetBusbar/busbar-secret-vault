@@ -29,6 +29,7 @@ url = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+jsonschema = { workspace = true }
 # The live-Vault test's stand-in for the host's framed exchange: a real HTTP client, test-only,
 # never in the plugin's closure.
 reqwest = { workspace = true, features = ["blocking"] }
