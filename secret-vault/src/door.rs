@@ -369,6 +369,7 @@ mod table {
         ops: busbar_contract::abi::secret::Ops,
         statement: super::STATEMENT,
         lifecycle: life(super::Vault),
+        migrate: busbar_contract::abi::sdk::migrate::Migrator<crate::migrate::VaultMigration>,
         kind_ops: { resolve: super::Safe<super::Resolve> },
     }
 }

@@ -358,29 +358,29 @@ fn a_malformed_reference_is_refused_before_any_exchange() {
     assert!(ex.seen.lock().unwrap().is_empty());
 }
 
-/// Every 1.5.5 class, its kind and its text byte for byte (the 1.5.5 module's format strings).
+/// Response classes retain useful, non-disclosing diagnostics.
 #[test]
-fn every_response_class_answers_1_5_5s_kind_and_text() {
+fn response_classes_report_kind_and_safe_context() {
     let p = "\"kv/data/openai\"";
     let cases: Vec<(Canned, SecretErrorKind, String)> = vec![
         (
             Canned::of(Err(ConnFailure::Failed("connection refused".into()))),
             SecretErrorKind::Unavailable,
             format!(
-                "request to Vault ({URL}) failed: error sending request for url ({URL}): \
+                "request to Vault ({URL}) failed: \
                  connection refused"
             ),
         ),
         (
             Canned::of(Err(ConnFailure::Failed("  \n".into()))),
             SecretErrorKind::Unavailable,
-            format!("request to Vault ({URL}) failed: error sending request for url ({URL})"),
+            format!("request to Vault ({URL}) failed"),
         ),
         (
             Canned::of(Err(ConnFailure::Refused("egress class refused".into()))),
             SecretErrorKind::Denied,
             format!(
-                "request to Vault ({URL}) failed: error sending request for url ({URL}): \
+                "request to Vault ({URL}) failed: \
                  egress class refused"
             ),
         ),
@@ -388,7 +388,7 @@ fn every_response_class_answers_1_5_5s_kind_and_text() {
             Canned::of(Err(ConnFailure::Unarmed)),
             SecretErrorKind::Internal,
             format!(
-                "request to Vault ({URL}) failed: error sending request for url ({URL}): \
+                "request to Vault ({URL}) failed: \
                  the instance was handed no connector"
             ),
         ),
@@ -754,7 +754,7 @@ fn a_pending_exchange_pends_the_resolve_then_answers_on_resume() {
 }
 
 #[test]
-fn config_parses_with_1_5_5s_refusals() {
+fn config_refusals_name_the_plugin_and_invalid_setting() {
     assert_eq!(
         parse_config(b"  \n").unwrap_err(),
         "hashicorp-vault plugin requires config (addr, token); none provided"
@@ -765,19 +765,13 @@ fn config_parses_with_1_5_5s_refusals() {
     );
     let e = parse_config(b"{ this is not json").unwrap_err();
     assert!(
-        e == "invalid hashicorp-vault plugin config: key must be a string at line 1 column 3",
+        e.contains("invalid hashicorp-vault plugin config") && e.contains("key must be a string"),
         "{e}"
     );
     let e = parse_config(br#"{"addr":"http://v"}"#).unwrap_err();
-    assert_eq!(
-        e,
-        "invalid hashicorp-vault plugin config: missing field `token` at line 1 column 19"
-    );
+    assert!(e.contains("missing field `token`"), "{e}");
     let e = parse_config(br#"{"token":"t"}"#).unwrap_err();
-    assert_eq!(
-        e,
-        "invalid hashicorp-vault plugin config: missing field `addr` at line 1 column 13"
-    );
+    assert!(e.contains("missing field `addr`"), "{e}");
     let e = parse_config(br#"{"addr":"http://v","token":"t","tls":true}"#).unwrap_err();
     assert!(e.contains("unknown field `tls`"), "{e}");
     let c = parse_config(br#"{"addr":"http://v","token":{"env":"T"},"timeout_secs":3}"#).unwrap();

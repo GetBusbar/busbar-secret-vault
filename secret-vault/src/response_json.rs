@@ -11,12 +11,11 @@
 //! tree many times its size. A selected non-string value is written straight to the JSON text
 //! `serde_json` prints for the parsed value (object keys sorted, the last of equal keys winning).
 //!
-//! A refusal reads as `serde_json`'s own over the document (see [`worded`]).
+//! Refusals report the guarded parser's current error and position without replaying the document.
 
 use std::ops::Range;
 
-use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, SeqAccess, Unexpected, Visitor};
-use serde::Deserialize;
+use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Unexpected, Visitor};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
@@ -62,7 +61,7 @@ pub(crate) enum Selected {
     Rendered(Zeroizing<Vec<u8>>),
 }
 
-/// 1.5.5's `VaultConfig` keys, in its order: serde's refusals list them so.
+/// The accepted open-time configuration keys.
 const CONFIG_FIELDS: &[&str] = &["addr", "token", "ca_cert_pem", "timeout_secs"];
 
 /// `data.data.<field>` of a Vault reply `body`.
@@ -81,10 +80,10 @@ pub(crate) fn select<C: Custody>(body: &[u8], field: &str, custody: C) -> Result
     };
     walk.deserialize(&mut de)
         .and_then(|selected| de.end().map(|()| selected))
-        .map_err(|e| worded(body, &e))
+        .map_err(|e| e.to_string())
 }
 
-/// The open-time settings `body` as a tree, judged as 1.5.5's `VaultConfig` was
+/// The open-time settings `body` as a tree, checked against `VaultConfig`
 /// (`deny_unknown_fields`; `addr` a string and `token` present; `ca_cert_pem` a string or null and
 /// `timeout_secs` a `u64` when given; each key at most once), with `serde_json`'s texts. Config
 /// strings have the same custody as a reply's.
@@ -99,7 +98,7 @@ pub(crate) fn parse_config<C: Custody>(body: &[u8], custody: C) -> Result<Wiped,
     Config(doc)
         .deserialize(&mut de)
         .and_then(|tree| de.end().map(|()| tree))
-        .map_err(|e| worded(body, &e))
+        .map_err(|e| e.to_string())
 }
 
 /// A copy of `body` with every byte inside a string (escapes included) replaced by `x`.
@@ -125,105 +124,6 @@ fn masked<C: Custody>(body: &[u8], custody: C) -> Zeroizing<Vec<u8>> {
 /// `serde_json`'s control-character refusal.
 const CONTROL: &str = "control character (\\u0000-\\u001F) found while parsing a string";
 
-/// The text of `ours`, the first refusal of a guarded parse of `body`, as 1.5.5's
-/// `serde_json::from_slice` worded it. serde reads no real string here, so a fault inside one is
-/// this reader's, placed after the string's closing quote. `serde_json`'s own pass over `body`
-/// (which copies nothing: an ignored string is only scanned) words and places an escape or
-/// control-character fault where 1.5.5 did, and is taken when it lies no later than ours; its
-/// control-character fault sits one byte before the one a parse that keeps the string reports, so
-/// it is moved on by that byte.
-fn worded(body: &[u8], ours: &serde_json::Error) -> String {
-    let mut ours_text = ours.to_string();
-    let mut ours_position = (ours.line(), ours.column());
-    let suffix = format!(" at line {} column {}", ours.line(), ours.column());
-    let message = ours_text.strip_suffix(&suffix).unwrap_or(&ours_text);
-    if let Some((message, offset)) = message.rsplit_once(" [vault-byte=") {
-        if let Some(offset) = offset
-            .strip_suffix(']')
-            .and_then(|s| s.parse::<usize>().ok())
-        {
-            ours_position = position(body, offset);
-            ours_text = format!(
-                "{message} at line {} column {}",
-                ours_position.0, ours_position.1
-            );
-        }
-    }
-    // An unterminated masked string never reaches a visitor. serde's real string reader
-    // can still reject a surrogate before reaching EOF; its ignored reader does not.
-    if let Some((message, offset)) = unterminated_surrogate(body) {
-        let at = position(body, offset);
-        if at <= ours_position {
-            ours_position = at;
-            ours_text = format!("{message} at line {} column {}", at.0, at.1);
-        }
-    }
-    match serde_json::from_slice::<IgnoredAny>(body) {
-        Err(theirs) if (theirs.line(), theirs.column()) <= ours_position => {
-            let text = theirs.to_string();
-            let at = format!(" at line {} column {}", theirs.line(), theirs.column());
-            if text.strip_suffix(&at) == Some(CONTROL) {
-                let (line, column) =
-                    position(body, index(body, theirs.line(), theirs.column()) + 1);
-                format!("{CONTROL} at line {line} column {column}")
-            } else {
-                text
-            }
-        }
-        _ => ours_text,
-    }
-}
-
-/// A surrogate refusal before EOF in the final, unterminated string, if any.
-fn unterminated_surrogate(body: &[u8]) -> Option<(&'static str, usize)> {
-    let mut start = None;
-    let mut escaped = false;
-    for (i, &byte) in body.iter().enumerate() {
-        if start.is_none() {
-            if byte == b'"' {
-                start = Some(i + 1);
-            }
-        } else if !escaped && byte == b'"' {
-            start = None;
-        } else {
-            escaped = !escaped && byte == b'\\';
-        }
-    }
-    let start = start?;
-    let raw = &body[start..];
-    let message = decode(raw, &mut Discard).err()?;
-    if !matches!(
-        message,
-        "unexpected end of hex escape" | "lone leading surrogate in hex escape"
-    ) {
-        return None;
-    }
-    let offset = surrogate_error_offset(raw)?;
-    (offset <= raw.len()).then_some((message, start + offset))
-}
-
-/// The byte index of `serde_json`'s 1-based `line` and 0-based `column` in `body`.
-fn index(body: &[u8], line: usize, column: usize) -> usize {
-    let start = match line.checked_sub(2) {
-        None => 0,
-        Some(newlines) => body
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| **b == b'\n')
-            .nth(newlines)
-            .map_or(body.len(), |(i, _)| i + 1),
-    };
-    start.saturating_add(column)
-}
-
-/// `serde_json`'s line and column for byte index `i` of `body`.
-fn position(body: &[u8], i: usize) -> (usize, usize) {
-    let head = body.get(..i).unwrap_or(body);
-    let start = head.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
-    let line = 1 + head[..start].iter().filter(|&&b| b == b'\n').count();
-    (line, head.len() - start)
-}
-
 /// The document a reader walks: its real bytes, the masked view serde reads, and the custody
 /// every buffer filled from it is reported to.
 #[derive(Clone, Copy)]
@@ -248,43 +148,14 @@ impl<'a, C: Custody> Doc<'a, C> {
         let mut decoded = Zeroizing::new(String::with_capacity(raw.len()));
         let result = decode(raw, &mut *decoded);
         self.custody.held(what, decoded.as_bytes());
-        result.map_err(|message| self.failure::<E>(raw, message))?;
+        result.map_err(E::custom)?;
         Ok(decoded)
-    }
-
-    /// Locate string syntax refusals without giving serde a secret-bearing scratch string.
-    /// Its ignored-string reader can consume beyond the closing quote for a short hex escape;
-    /// use the real document tail so that both the text and consumed-byte position match.
-    fn failure<E: Error>(self, raw: &[u8], message: &'static str) -> E {
-        let start = raw.as_ptr() as usize - self.body.as_ptr() as usize;
-        if matches!(
-            message,
-            "unexpected end of hex escape" | "lone leading surrogate in hex escape"
-        ) {
-            if let Some(offset) = surrogate_error_offset(raw) {
-                return E::custom(format!("{message} [vault-byte={}]", start + offset));
-            }
-        }
-        let quote = start.saturating_sub(1);
-        let tail = &self.body[quote..];
-        let mut de = serde_json::Deserializer::from_slice(tail);
-        if let Err(error) = IgnoredAny::deserialize(&mut de) {
-            let text = error.to_string();
-            let suffix = format!(" at line {} column {}", error.line(), error.column());
-            let text = text.strip_suffix(&suffix).unwrap_or(&text);
-            let mut offset = index(tail, error.line(), error.column());
-            if text == CONTROL {
-                offset += 1;
-            }
-            return E::custom(format!("{text} [vault-byte={}]", quote + offset));
-        }
-        E::custom(message)
     }
 
     /// Refuse the string serde read as `masked` unless it decodes, copying it nowhere.
     fn validated<E: Error>(self, masked: &str) -> Result<(), E> {
         let raw = self.raw::<E>(masked)?;
-        decode(raw, &mut Discard).map_err(|message| self.failure::<E>(raw, message))
+        decode(raw, &mut Discard).map_err(E::custom)
     }
 }
 
@@ -710,7 +581,7 @@ impl<'de, C: Custody> Visitor<'de> for Key<'_, C> {
     }
 }
 
-/// The open-time settings object (1.5.5's `VaultConfig`).
+/// The open-time settings object.
 struct Config<'a, C>(Doc<'a, C>);
 
 impl<'de, C: Custody> DeserializeSeed<'de> for Config<'_, C> {
@@ -810,8 +681,7 @@ impl<'de, C: Custody> Visitor<'de> for OptionalText<'_, C> {
     }
 }
 
-/// The `timeout_secs` setting: a `u64`, refused with serde's `u64` texts (a string's real text
-/// quoted, as 1.5.5 quoted it).
+/// The `timeout_secs` setting: an unsigned integer number of seconds.
 struct Seconds<'a, C>(Doc<'a, C>);
 
 impl<'de, C: Custody> DeserializeSeed<'de> for Seconds<'_, C> {
@@ -984,48 +854,6 @@ fn decode(mut raw: &[u8], out: &mut impl Sink) -> Result<(), &'static str> {
     } else {
         Ok(())
     }
-}
-
-/// The position after the byte that makes a UTF-16 escape invalid. Like serde's
-/// string reader, this may consume the closing quote just beyond `raw`.
-fn surrogate_error_offset(raw: &[u8]) -> Option<usize> {
-    let mut i = 0;
-    while i < raw.len() {
-        if raw[i] != b'\\' {
-            i += 1;
-            continue;
-        }
-        i += 1;
-        if *raw.get(i)? != b'u' {
-            i += 1;
-            continue;
-        }
-        i += 1;
-        let mut tail = raw.get(i..)?;
-        let first = hex4(&mut tail).ok()?;
-        i += 4;
-        if (0xDC00..0xE000).contains(&first) {
-            return Some(i);
-        }
-        if !(0xD800..0xDC00).contains(&first) {
-            continue;
-        }
-        if raw.get(i) != Some(&b'\\') {
-            return Some(i + 1);
-        }
-        i += 1;
-        if raw.get(i) != Some(&b'u') {
-            return Some(i + 1);
-        }
-        i += 1;
-        let mut tail = raw.get(i..)?;
-        let low = hex4(&mut tail).ok()?;
-        i += 4;
-        if !(0xDC00..0xE000).contains(&low) {
-            return Some(i);
-        }
-    }
-    None
 }
 
 /// The four hex digits of a `\u` escape at the start of `raw`, consumed.

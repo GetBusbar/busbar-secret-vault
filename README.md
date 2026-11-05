@@ -118,7 +118,9 @@ the fields a secret holds), the token or the material.
 
 ## Differences from 1.5.5
 
-Vault replies are parsed without allocating trees for unrelated fields. This bounds memory amplification from hostile replies while preserving selected values, including JSON rendering of non-string fields. Owned parsing buffers are wiped before release.
+Vault replies are parsed without allocating trees for unrelated fields. This bounds memory amplification from hostile replies while preserving selected values, including JSON rendering of non-string fields. Owned parsing buffers are wiped before release. Error messages report the current guarded parser and host connector; historical serde error columns and reqwest error wording are not reproduced.
+
+For a pre-1.6 configuration with an inline `token`, the plugin's migration entry asks the host to extract the exact credential bytes to a private file and replace the value with a file secret reference. Structured references remain unchanged. The migration report never prints the token, and runtime token handling remains reference-only.
 
 ## Build
 
@@ -206,7 +208,7 @@ get`/the Vault UI show), with the field to extract named either as a
 `cargo test` (run at the workspace root) runs:
 
 - `busbar-secret-vault`'s hermetic unit tests: reference parsing, the
-  request it builds, every 1.5.5 response class and its text (a transport failure appends the host's cause), the
+  request it builds, response error classes and safe diagnostics (a transport failure includes the host's cause), the
   body cap, a pending exchange, the config refusals, and the door's
   slots (READY with the material written into the host's buffer under no
   lease, FAILED with its `ERROR_KIND_*`, PENDING then resumed). One test reads a real Vault

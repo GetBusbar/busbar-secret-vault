@@ -63,6 +63,7 @@ use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 pub mod door;
+mod migrate;
 mod response_json;
 
 /// The plugin's name: the Statement's and the manifest's. (The `module` alias a reference spells is
@@ -125,7 +126,7 @@ impl std::fmt::Debug for VaultConfig {
 }
 
 /// Parse the open-time settings bytes: an empty (or whitespace-only) config and a malformed one
-/// are refused, naming the plugin, with 1.5.5's texts (`serde_json`'s, positions included). Then
+/// are refused, naming the plugin, with the guarded parser's current diagnostic. Then
 /// each value is judged, so `validate`, `open` and `refresh` refuse what could never serve, naming
 /// the key (the texts this crate words never quote a value; a JSON type error can quote the
 /// offending, non-secret value): an `addr` that is not an `http://` or `https://` URL naming a host
@@ -684,8 +685,7 @@ fn status_text(status: u16) -> String {
 /// transport failure, 404, 403, 429, 5xx, the body cap, 3xx (a redirect is never followed), any
 /// other non-2xx, then the JSON, the KV v2 shape and the field.
 ///
-/// A transport failure's text is 1.5.5's `error sending request for url (..)`, naming the URL as
-/// it was sent (including normalized host and default port), and the host's own cause follows it (`: {cause}`), so a refused
+/// A transport failure names the configured request URL and the host's cause, so a refused
 /// need, an unarmed host or an oversize reply is explained; an empty cause leaves the bare text.
 ///
 /// The reply is read without handing `serde_json` a string's bytes and without building a tree:
@@ -721,12 +721,7 @@ pub(crate) fn judge_with<C: Custody>(
         } else {
             format!(": {cause}")
         };
-        let sent = url::Url::parse(url)
-            .map(|parsed| parsed.to_string())
-            .unwrap_or_else(|_| wire_url(url));
-        let text = format!(
-            "request to Vault ({url}) failed: error sending request for url ({sent}){tail}"
-        );
+        let text = format!("request to Vault ({url}) failed{tail}");
         match failure {
             ConnFailure::Failed(_) | ConnFailure::CredentialUnavailable => {
                 SecretModuleError::unavailable(text)

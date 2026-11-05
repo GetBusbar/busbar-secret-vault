@@ -63,17 +63,7 @@ fn unrelated_subtrees_are_validated_without_decoding_allocations() {
 }
 
 #[test]
-fn config_refusals_keep_serde_wording_and_document_order() {
-    #[allow(dead_code)]
-    #[derive(Debug, serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct VaultConfig {
-        addr: String,
-        token: serde_json::Value,
-        ca_cert_pem: Option<String>,
-        #[serde(default = "default_timeout_secs")]
-        timeout_secs: u64,
-    }
+fn config_refusals_report_current_parser_context() {
     for body in [
         r#"{"addr":true,"token":"t"}"#,
         r#"{"addr":"http://v","token":"t","ca_cert_pem":17}"#,
@@ -85,19 +75,21 @@ fn config_refusals_keep_serde_wording_and_document_order() {
         r#"true"#,
         r#""wrong root""#,
     ] {
-        let expected = serde_json::from_str::<VaultConfig>(body)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(
-            parse_config(body.as_bytes()).unwrap_err(),
-            format!("invalid hashicorp-vault plugin config: {expected}"),
-            "{body}"
+        let error = parse_config(body.as_bytes()).unwrap_err();
+        assert!(
+            error.starts_with("invalid hashicorp-vault plugin config:"),
+            "{error}"
         );
+        assert!(
+            error.contains(" at line ") && error.contains(" column "),
+            "{error}"
+        );
+        assert!(!error.contains("vault-byte="), "{error}");
     }
 }
 
 #[test]
-fn malformed_string_errors_keep_serde_positions() {
+fn malformed_string_errors_report_safe_current_parser_context() {
     for body in [
         br#"{"data":{"data":{"k":"bad\q"}}}"#.as_slice(),
         br#"{"data":{"data":{"k":"bad\u12"}}}"#,
@@ -116,12 +108,15 @@ fn malformed_string_errors_keep_serde_positions() {
         b"{\"data\":{\"data\":{\"k\":\"bad\x01text\"}}}",
         br#"{"unselected":"bad\q","data":{"data":{"k":"secret"}}}"#,
     ] {
-        let expected = serde_json::from_slice::<serde_json::Value>(body)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(
-            response_json::select(body, "k", Unwatched).err().unwrap(),
-            expected
+        let error = response_json::select(body, "k", Unwatched).err().unwrap();
+        assert!(
+            error.contains(" at line ") && error.contains(" column "),
+            "{error}"
+        );
+        assert!(!error.contains("vault-byte="), "{error}");
+        assert!(
+            !error.contains("secret") && !error.contains("bad"),
+            "{error}"
         );
     }
 }
@@ -147,20 +142,6 @@ fn request_targets_match_reqwest_url_parsing() {
             None => parsed.path().to_owned(),
         };
         assert_eq!(request.target, expected, "{path:?}");
-        let error = judge(
-            path,
-            "k",
-            &request.url,
-            Err(ConnFailure::Failed(String::new())),
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .message
-                .ends_with(&format!("error sending request for url ({parsed})")),
-            "{}",
-            error.message
-        );
     }
 }
 
@@ -197,7 +178,7 @@ fn requests_share_the_wiped_ca_allocation() {
 }
 
 #[test]
-fn transport_failure_url_normalizes_authority_like_reqwest() {
+fn transport_failures_report_target_and_connector_cause() {
     for addr in [
         "http://VAULT:80",
         "https://VAULT:443",
@@ -208,20 +189,20 @@ fn transport_failure_url_normalizes_authority_like_reqwest() {
         let request = VaultClient::new(&config, b"token")
             .request("a/../b")
             .unwrap();
-        let expected = reqwest::Url::parse(&request.url).unwrap();
         let error = judge(
             "a/../b",
             "k",
             &request.url,
-            Err(ConnFailure::Failed(String::new())),
+            Err(ConnFailure::Failed("connection refused".into())),
         )
         .unwrap_err();
+        assert_eq!(error.kind, SecretErrorKind::Unavailable);
+        assert!(error.message.contains(&request.url), "{}", error.message);
         assert!(
-            error
-                .message
-                .ends_with(&format!("error sending request for url ({expected})")),
+            error.message.contains("connection refused"),
             "{}",
             error.message
         );
+        assert!(!error.message.contains("token"), "{}", error.message);
     }
 }

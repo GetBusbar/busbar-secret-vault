@@ -113,10 +113,9 @@ fn open_and_refresh_need_the_token_material() {
         .refresh(b"{}", &[&b"tok"[..]], 2)
         .expect_err("a bad reload");
     assert_eq!(r.outcome(), Outcome::Failed);
-    assert_eq!(
-        r.text(),
-        Some("invalid hashicorp-vault plugin config: missing field `addr` at line 1 column 2")
-    );
+    assert!(r
+        .text()
+        .is_some_and(|text| text.contains("missing field `addr`")));
     let r = v.refresh(SETTINGS, &[], 2).expect_err("no token");
     assert_eq!(r.outcome(), Outcome::Failed);
     assert_eq!(
