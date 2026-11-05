@@ -514,6 +514,10 @@ fn resolve_on_gated(
         dispatcher.drop_client(ticket);
         let done = reply.wait_done();
         dispatcher.recycle(ticket);
+        assert!(
+            dispatcher.retirement_barrier(ticket, Duration::from_secs(10)),
+            "the cancelled resolve retires before another lifecycle call"
+        );
         assert_eq!(done.disposition, Some(secret::cancel::ABORTED));
         (
             Called {
@@ -554,6 +558,13 @@ fn resolve_on_gated(
         }
         let done = reply.wait_done();
         dispatcher.recycle(ticket);
+        // Reply delivery precedes the worker's deferred binding-admission drop. REFRESH
+        // correctly refuses while that crossing is still retiring, so synchronize with
+        // retirement rather than racing it or retrying away the crossing assertion.
+        assert!(
+            dispatcher.retirement_barrier(ticket, Duration::from_secs(10)),
+            "the completed resolve retires before another lifecycle call"
+        );
         (
             Called {
                 outcome: done.outcome,
