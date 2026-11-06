@@ -47,7 +47,7 @@ or an on-disk file.
 This repo brings 100% of what it needs — a 2-crate Cargo workspace on the
 secret kind's **memory ABI** (`busbar_contract::abi::secret`):
 
-- **`secret-vault/`** (crate `busbar-secret-vault`, `#![forbid(unsafe_code)]`)
+- **`secret-vault/`** (crate `busbar-secret-vault`, `forbid(unsafe_code)` outside tests)
   — the sans-IO Vault KV v2 client (field addressing, the request it
   sends, the 1 MiB response cap, and 404/403/5xx error classification)
   and its door, `door::door`: every slot a safe SDK slot over the secret
@@ -83,7 +83,7 @@ AppRole/Kubernetes login flows are a natural future extension of
 | `ca_cert_pem` | no | — | An additional trusted root CA (PEM), layered on top of the built-in public root store — for a self-hosted Vault behind a private CA. Never disables certificate validation. A value holding no `-----BEGIN CERTIFICATE-----` block, or a block whose body is not valid base64 or not a DER SEQUENCE of its stated length, is refused (`invalid ca_cert_pem: ...`). |
 | `timeout_secs` | no | `10` | HTTP timeout (connect + total), in seconds; at least 1. The host bounds every resolve by its 30 s call deadline, so a larger value cannot extend it. |
 
-Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
+Unknown config fields are rejected — a typo'd or
 stray key fails loudly at boot instead of being silently ignored. `validate`,
 `open` and `refresh` refuse the same settings, naming the key; all
 refusals omit configuration values. Parser errors expose only their class and position;
@@ -128,7 +128,7 @@ the version CI uses. busbar is a pinned git dependency (see
 
 ```sh
 cargo build --release -p busbar-secret-vault-plugin --features dropped-in   # the dropped-in cdylib: target/release/libbusbar_secret_vault_plugin.{so,dylib}
-cargo test                 # unit tests + the linked/dropped-in conformance test (secret-vault-plugin/tests/conformance.rs)
+BUSBAR_PLUGIN_CDYLIB="$PWD/target/release/libbusbar_secret_vault_plugin.so" cargo test --release   # unit tests + the linked/dropped-in tests; the plugin tests need the absolute path of the cdylib built above (.dylib on macOS)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -140,12 +140,15 @@ depends on it as a normal workspace path dependency (`../secret-vault`).
 
 The one [busbar](https://github.com/GetBusbar/busbar) crate either crate
 names is `busbar-contract` — the plugin contract, whose `abi::sdk` module
-carries the door macros. `busbar-plugin-loader` is a dev-dependency only,
-for the linked + dropped-in conformance test. Both are **git dependencies
-pinned to one busbar commit**: the `rev` in the root `Cargo.toml`'s
-`[workspace.dependencies]` table (the members take it with
-`{ workspace = true }`) is field 1 of `.busbar-ref`, and the single `ci`
-job refuses a manifest that disagrees.
+carries the door macros. The plugin crate's tests also take, as
+dev-dependencies only, `busbar-plugin-loader` (the linked + dropped-in
+tests), `busbar-kernel` and `busbar-core-connector` from busbar, and the
+`busbar-transport-tcp` / `busbar-transport-http` plugins (the real host
+connector the bounded-response tests drive). The busbar crates are **git
+dependencies pinned to one busbar commit**: the `rev` in the root
+`Cargo.toml`'s `[workspace.dependencies]` table (the members take it with
+`{ workspace = true }`) is field 1 of `.busbar-ref`, and CI checks that the
+two agree.
 No sibling checkout of busbar is needed to build or test.
 
 ### Pack and sign
@@ -199,11 +202,11 @@ opened. A field reference like `providers.openai.api_key` then names
 v1 API path INCLUDING the KV v2 `data/` segment (exactly what `vault kv
 get`/the Vault UI show), with the field to extract named either as a
 `#field` suffix (as above) or a separate `field` key — see
-[Config](#config) below for both forms.
+[Config](#config) above for both forms.
 
 ## Tests
 
-`cargo test` (run at the workspace root) runs:
+`cargo test` (run at the workspace root, with `BUSBAR_PLUGIN_CDYLIB` set as under [Build](#build)) runs:
 
 - `busbar-secret-vault`'s hermetic unit tests: reference parsing, the
   request it builds, response error classes and safe diagnostics (a transport failure includes the host's cause), the
@@ -220,7 +223,7 @@ get`/the Vault UI show), with the field to extract named either as a
 
 ```sh
 docker run --rm -p 8200:8200 --cap-add=IPC_LOCK -e VAULT_DEV_ROOT_TOKEN_ID=root hashicorp/vault
-BUSBAR_TEST_VAULT_ADDR=http://127.0.0.1:8200 BUSBAR_TEST_VAULT_TOKEN=root cargo test
+BUSBAR_TEST_VAULT_ADDR=http://127.0.0.1:8200 BUSBAR_TEST_VAULT_TOKEN=root cargo test -p busbar-secret-vault
 ```
 
 ## License

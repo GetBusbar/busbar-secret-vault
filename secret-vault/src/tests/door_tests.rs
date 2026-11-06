@@ -316,3 +316,35 @@ fn an_unbuilt_exchange_is_a_non_retryable_wiring_fault() {
         ConnFailure::Failed(_)
     ));
 }
+
+/// Beyond its transport, target and trust (tests/needs.rs), each need carries no auth of its own,
+/// no details, no kept or denied response-head fields and no timeout of its own (the request's and
+/// the host's call deadline govern): only its trust source differs.
+#[test]
+#[allow(unsafe_code)]
+fn each_need_carries_no_auth_details_head_fields_or_timeout_of_its_own() {
+    for (n, trust) in [
+        (need(NONE), None),
+        (need(abi_str(TRUST_FROM)), Some("settings.ca_cert_pem")),
+    ] {
+        // SAFETY: every present string here is a `&'static str` from `abi_str`.
+        let text = |s: &AbiStr| (!s.is_absent()).then(|| unsafe { s.as_str() }.unwrap());
+        assert_eq!(text(&n.trust_from), trust);
+        assert_eq!(text(&n.auth), None);
+        assert!(n.details.ptr.is_null());
+        assert_eq!(n.keep_response_headers_len, 0);
+        assert_eq!(n.deny_response_headers_len, 0);
+        assert_eq!(n.timeout_ms, 0);
+    }
+}
+
+/// An instance's `Debug` names no setting, token or address.
+#[test]
+fn an_instance_debug_prints_nothing_of_its_client() {
+    let cfg = crate::parse_config(br#"{"addr":"https://u:p@vault.example","token":"t"}"#).unwrap();
+    let shown = format!(
+        "{:?}",
+        Vault::new(VaultClient::new(&cfg, b"s.instance-token"))
+    );
+    assert_eq!(shown, "Vault { .. }");
+}
