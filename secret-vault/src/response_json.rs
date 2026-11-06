@@ -220,7 +220,11 @@ impl<'de, C: Custody> Visitor<'de> for Walk<'_, C> {
         } else {
             Selected::NoData
         };
-        while let Some(key) = map.next_key_seed(Key(self.doc))? {
+        while let Some(key) = map.next_key_seed(AnyKey(self.doc))? {
+            let ObjectKey::Text(key) = key else {
+                map.next_value_seed(NumberText)?;
+                return Ok(Selected::NoData);
+            };
             if key.as_str() != wanted {
                 map.next_value_seed(Skip(self.doc))?;
             } else if fields {
@@ -401,7 +405,11 @@ impl<'de, C: Custody> Visitor<'de> for Render<'_, '_, C> {
         let Self { doc, out, .. } = self;
         let mut arena = Guarded::empty(doc.custody);
         let mut members = Vec::new();
-        while let Some(key) = map.next_key_seed(Key(doc))? {
+        while let Some(key) = map.next_key_seed(AnyKey(doc))? {
+            let ObjectKey::Text(key) = key else {
+                let number = map.next_value_seed(NumberText)?;
+                return out.json::<_, A::Error>(&number);
+            };
             let start = arena.len();
             arena.push(key.as_bytes());
             let name = start..arena.len();
@@ -539,7 +547,23 @@ impl<'de, C: Custody> Visitor<'de> for Skip<'_, C> {
     }
 
     fn visit_borrowed_str<E: Error>(self, value: &'de str) -> Result<(), E> {
-        self.0.validated(value)
+        if self.0.raw::<E>(value).is_err() && value == "$serde_json::private::Number" {
+            // A synthetic number key, not bytes from a JSON string in the document.
+            Ok(())
+        } else {
+            self.0.validated(value)
+        }
+    }
+
+    fn visit_str<E: Error>(self, _: &str) -> Result<(), E> {
+        Err(E::custom("unexpected non-borrowed JSON string"))
+    }
+
+    fn visit_string<E: Error>(self, value: String) -> Result<(), E> {
+        // Only serde_json's already-validated numeric token is owned; masked document
+        // strings are borrowed and validated above, without decoding allocations.
+        drop(Zeroizing::new(value));
+        Ok(())
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
@@ -552,6 +576,70 @@ impl<'de, C: Custody> Visitor<'de> for Skip<'_, C> {
             map.next_value_seed(Skip(self.0))?;
         }
         Ok(())
+    }
+}
+
+/// An actual object key, or serde_json's synthetic arbitrary-precision number tag.
+/// Actual keys always borrow from the masked view. Checking that provenance before the tag
+/// prevents a document key with serde's private spelling from impersonating a number.
+enum ObjectKey {
+    Text(Zeroizing<String>),
+    Number,
+}
+
+struct AnyKey<'a, C>(Doc<'a, C>);
+
+impl<'de, C: Custody> DeserializeSeed<'de> for AnyKey<'_, C> {
+    type Value = ObjectKey;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, de: D) -> Result<ObjectKey, D::Error> {
+        de.deserialize_str(self)
+    }
+}
+
+impl<'de, C: Custody> Visitor<'de> for AnyKey<'_, C> {
+    type Value = ObjectKey;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an object key or a serde_json number tag")
+    }
+
+    fn visit_borrowed_str<E: Error>(self, value: &'de str) -> Result<ObjectKey, E> {
+        if self.0.raw::<E>(value).is_ok() {
+            self.0.decoded(value, Held::Key).map(ObjectKey::Text)
+        } else if value == "$serde_json::private::Number" {
+            Ok(ObjectKey::Number)
+        } else {
+            Err(E::custom("invalid JSON string span"))
+        }
+    }
+}
+
+/// Only the synthetic number map supplies an owned string. JSON strings still use the guarded
+/// decoder above; this numeric token has already been validated by serde_json's lexer.
+struct NumberText;
+
+impl<'de> DeserializeSeed<'de> for NumberText {
+    type Value = serde_json::Number;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, de: D) -> Result<Self::Value, D::Error> {
+        de.deserialize_string(self)
+    }
+}
+
+impl<'de> Visitor<'de> for NumberText {
+    type Value = serde_json::Number;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("serde_json's numeric token")
+    }
+
+    fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
+        value.parse().map_err(E::custom)
+    }
+
+    fn visit_string<E: Error>(self, value: String) -> Result<Self::Value, E> {
+        self.visit_str(&Zeroizing::new(value))
     }
 }
 
@@ -769,7 +857,10 @@ impl<'de, C: Custody> Visitor<'de> for Tree<'_, C> {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Wiped, A::Error> {
         let mut tree = Wiped::object();
-        while let Some(mut key) = map.next_key_seed(Key(self.0))? {
+        while let Some(key) = map.next_key_seed(AnyKey(self.0))? {
+            let ObjectKey::Text(mut key) = key else {
+                return Ok(Wiped(Value::Number(map.next_value_seed(NumberText)?)));
+            };
             let mut value = map.next_value_seed(Tree(self.0))?;
             tree.put(&mut key, &mut value.0);
         }

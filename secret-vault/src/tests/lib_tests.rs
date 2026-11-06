@@ -1259,7 +1259,9 @@ fn response_strings_and_non_string_material_keep_serde_json_semantics() {
         "-9223372036854775809",
         "1.25e+30",
         "1e308",
+        "1e400",
         "0e-100000",
+        r#"[1e400,18446744073709551616,{"n":-9223372036854775809}]"#,
     ] {
         let body =
             format!(r#"{{"data":null,"\u0064ata":{{"data":{{"k":"discard","\u006b":{value}}}}}}}"#);
@@ -1280,8 +1282,23 @@ fn response_strings_and_non_string_material_keep_serde_json_semantics() {
             }),
         )
         .unwrap();
-        assert_eq!(actual, expected);
+        assert_eq!(actual, expected, "{value}");
     }
+
+    // Numeric values in skipped branches and at each envelope level must be consumed as
+    // numbers too. A real object key cannot impersonate serde_json's synthetic number tag.
+    for body in [
+        r#"{"ignored":1e400,"data":{"ignored":1.25,"data":{"ignored":18446744073709551616,"k":"kept"}}}"#,
+        r#"{"data":1e400,"data":{"data":-9223372036854775809,"data":{"k":"kept"}}}"#,
+    ] {
+        let selected =
+            response_json::select(body.as_bytes(), "k", response_json::Unwatched).unwrap();
+        assert!(matches!(selected, response_json::Selected::Text(text) if text.as_str() == "kept"));
+    }
+    let body = br#"{"data":{"data":{"k":{"$serde_json::private::Number":"secret"}}}}"#;
+    let selected = response_json::select(body, "k", response_json::Unwatched).unwrap();
+    assert!(matches!(selected, response_json::Selected::Rendered(text)
+        if text.as_slice() == br#"{"$serde_json::private::Number":"secret"}"#));
 }
 
 #[test]
@@ -1296,7 +1313,7 @@ fn invalid_response_strings_numbers_and_nesting_are_still_refused() {
         r#""\u123""#,
         "\"literal\nnewline\"",
         "01",
-        "1e400",
+        "1e",
         "1.",
         "+1",
         "[true,]",
