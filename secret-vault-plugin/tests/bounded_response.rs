@@ -241,7 +241,9 @@ fn host(
     busbar_core_connector::io::install_process_reactor(io.clone());
     static TRANSPORT_DISPATCHER: OnceLock<Arc<Dispatcher>> = OnceLock::new();
     let transport_dispatcher = Arc::clone(TRANSPORT_DISPATCHER.get_or_init(|| {
-        let dispatcher = Arc::new(Dispatcher::new(Default::default()));
+        // Request-head preparation runs here too, so the transport dispatcher needs the
+        // production host clock, just as the outer Vault dispatcher does.
+        let dispatcher = dispatcher();
         dispatcher.install_runtime(io);
         dispatcher.install_io(busbar_core_connector::hostio::process());
         dispatcher
