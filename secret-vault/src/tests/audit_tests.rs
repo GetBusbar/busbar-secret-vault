@@ -3,7 +3,6 @@
 
 use super::*;
 use busbar_contract::secret::SecretErrorKind;
-use std::cell::Cell;
 
 #[test]
 fn selected_values_keep_value_parser_semantics() {
@@ -26,7 +25,7 @@ fn selected_values_keep_value_parser_semantics() {
             "http://v/v1/p",
             Ok(Response {
                 status: 200,
-                body: body.as_bytes().to_vec(),
+                body: busbar_contract::abi::sdk::cred::Held::new(body.as_bytes().to_vec()),
                 body_len: body.len(),
             }),
         )
@@ -36,34 +35,7 @@ fn selected_values_keep_value_parser_semantics() {
 }
 
 #[test]
-fn unrelated_subtrees_are_validated_without_decoding_allocations() {
-    #[derive(Clone, Copy)]
-    struct Count<'a>(&'a Cell<usize>);
-    impl Custody for Count<'_> {
-        fn held(self, what: response_json::Held, _: &[u8]) {
-            if what != response_json::Held::View {
-                self.0.set(self.0.get() + 1);
-            }
-        }
-    }
-    let body = format!(
-        "{{\"ignored\":[{}],\"data\":{{\"data\":{{\"k\":\"secret\"}}}}}}",
-        vec![r#"{"":"unused"}"#; 10_000].join(",")
-    );
-    let count = Cell::new(0);
-    let selected = response_json::select(body.as_bytes(), "k", Count(&count)).unwrap();
-    assert!(matches!(selected, Selected::Text(ref text) if text.as_str() == "secret"));
-    assert_eq!(
-        count.get(),
-        5,
-        "four path keys and one selected string, independent of sibling count"
-    );
-    let malformed = body.replace("unused", r"bad\q");
-    assert!(response_json::select(malformed.as_bytes(), "k", Unwatched).is_err());
-}
-
-#[test]
-fn config_refusals_report_current_parser_context() {
+fn config_refusals_keep_schema_policy_without_quoting_values() {
     for body in [
         r#"{"addr":true,"token":"t"}"#,
         r#"{"addr":"http://v","token":"t","ca_cert_pem":17}"#,
@@ -75,13 +47,13 @@ fn config_refusals_report_current_parser_context() {
         r#"true"#,
         r#""wrong root""#,
     ] {
-        let error = parse_config(body.as_bytes()).unwrap_err();
+        let error = parse_config(body.as_bytes()).err().unwrap();
         assert!(
             error.starts_with("invalid hashicorp-vault plugin config:"),
             "{error}"
         );
         assert!(
-            error.contains(" at line ") && error.contains(" column "),
+            !error.contains("wrong root") && !error.contains("http://w"),
             "{error}"
         );
         assert!(!error.contains("vault-byte="), "{error}");
@@ -108,9 +80,12 @@ fn malformed_string_errors_report_safe_current_parser_context() {
         b"{\"data\":{\"data\":{\"k\":\"bad\x01text\"}}}",
         br#"{"unselected":"bad\q","data":{"data":{"k":"secret"}}}"#,
     ] {
-        let error = response_json::select(body, "k", Unwatched).err().unwrap();
+        let error = cred::select_json(Held::new(body.to_vec()), &["data", "data", "k"])
+            .err()
+            .unwrap()
+            .to_string();
         assert!(
-            error.contains(" at line ") && error.contains(" column "),
+            error.contains("line ") && error.contains(" column "),
             "{error}"
         );
         assert!(!error.contains("vault-byte="), "{error}");
@@ -157,7 +132,8 @@ fn transport_failures_preserve_retryability_classes() {
     ] {
         assert_eq!(
             judge("p", "k", "http://v/v1/p", Err(failure))
-                .unwrap_err()
+                .err()
+                .unwrap()
                 .kind,
             kind
         );
@@ -195,7 +171,8 @@ fn transport_failures_report_target_and_connector_cause() {
             &request.url,
             Err(ConnFailure::Failed("connection refused".into())),
         )
-        .unwrap_err();
+        .err()
+        .unwrap();
         assert_eq!(error.kind, SecretErrorKind::Unavailable);
         assert!(error.message.contains(&request.url), "{}", error.message);
         assert!(
@@ -206,3 +183,5 @@ fn transport_failures_report_target_and_connector_cause() {
         assert!(!error.message.contains("token"), "{}", error.message);
     }
 }
+
+use crate::custody_support::judge;

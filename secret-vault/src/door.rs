@@ -32,7 +32,6 @@ use busbar_contract::abi::sdk::secret::{failed, settings_of};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::abi::secret::{cancel, ResolveIn, ResolveOut};
 use busbar_contract::secret::SecretResult;
-use zeroize::Zeroize;
 
 use crate::{parse_config, Exchange, Exchanged, Request, VaultClient};
 
@@ -185,19 +184,24 @@ fn need_for(request: &Request) -> u32 {
 
 /// The framed exchange for `request`: the need it goes over, and the builder of the SDK request
 /// (lazy: the op runs it only on its first entry).
-fn framed(request: &Request) -> (u32, impl FnOnce() -> Result<sdk::Request, String> + '_) {
+type FramedRequest = (sdk::Request, Vec<sdk::SealedField>);
+
+fn framed(request: &Request) -> (u32, impl FnOnce() -> Result<FramedRequest, String> + '_) {
     (need_for(request), move || {
-        Ok(sdk::Request {
-            method: request.method.as_bytes().to_vec(),
-            target: request.target.clone().into_bytes(),
-            fields: request
+        Ok((
+            sdk::Request {
+                method: request.method.as_bytes().to_vec(),
+                target: request.target.clone().into_bytes(),
+                fields: Vec::new(),
+                body: Vec::new(),
+                timeout_ms: request.timeout_ms,
+            },
+            request
                 .fields
                 .iter()
-                .map(|(n, v)| (n.as_bytes().to_vec(), v.to_vec()))
+                .map(|(name, value)| (0, name.as_bytes().to_vec(), value.field()))
                 .collect(),
-            body: Vec::new(),
-            timeout_ms: request.timeout_ms,
-        })
+        ))
     })
 }
 
@@ -205,11 +209,13 @@ impl Exchange for HostExchange<'_> {
     fn exchange(&self, request: &Request) -> Exchanged {
         self.op.set_timeout_ms(request.timeout_ms);
         let (need, build) = framed(request);
-        let answered =
-            self.op
-                .exchange_sealed_bounded_with_head(need, None, request.body_cap, false, || {
-                    build().map(|request| (request, Vec::new()))
-                });
+        let answered = self.op.exchange_protected_bounded_with_head(
+            need,
+            None,
+            request.body_cap,
+            false,
+            build,
+        );
         match answered {
             std::task::Poll::Pending => Exchanged::Pending,
             std::task::Poll::Ready(answer) => bounded_reply(answer, request.body_cap),
@@ -221,7 +227,7 @@ impl Exchange for HostExchange<'_> {
 /// response status, answered as over the cap: the judge preserves 404/403/5xx precedence over the
 /// body cap; all other statuses get the ordinary over-cap refusal.
 fn bounded_reply(
-    answer: Result<sdk::ExchangeResponse, sdk::ExchangeFailure>,
+    answer: Result<sdk::ProtectedResponse, sdk::ExchangeFailure>,
     cap: usize,
 ) -> Exchanged {
     match answer {
@@ -231,13 +237,17 @@ fn bounded_reply(
             match error.head() {
                 Some(head) if stopped => Exchanged::Done(Ok(crate::Response {
                     status: head.status,
-                    body: Vec::new(),
+                    body: cred::Held::new(Vec::new()),
                     body_len: cap.saturating_add(1),
                 })),
                 _ => Exchanged::Done(Err(failure_class(error.into_cause()))),
             }
         }
-        Ok(reply) => Exchanged::Done(Ok(cut_to_cap(reply, cap))),
+        Ok(reply) => Exchanged::Done(Ok(crate::Response {
+            status: reply.head.status,
+            body_len: reply.body.len(),
+            body: reply.body,
+        })),
     }
 }
 
@@ -248,24 +258,6 @@ fn failure_class(failure: sdk::OpFailure) -> ConnFailure {
         sdk::OpFailure::Conn(cause) => cause,
         sdk::OpFailure::Unbuilt(_) => ConnFailure::Fault,
     }
-}
-
-/// The exchange's reply as the plugin's [`crate::Response`]: the body is moved, cut to `cap`; what
-/// lies past the cap is wiped, and the rest of the reply with it: no tail is left behind.
-/// `body_len` keeps the full length so the judge can tell "at the cap" from "over it".
-fn cut_to_cap(mut r: sdk::ExchangeResponse, cap: usize) -> crate::Response {
-    let body_len = r.body.len();
-    let kept = body_len.min(cap);
-    r.body[kept..].zeroize();
-    let mut body = std::mem::take(&mut r.body);
-    body.truncate(kept);
-    let response = crate::Response {
-        status: r.status,
-        body,
-        body_len,
-    };
-    r.zeroize();
-    response
 }
 
 /// One instance: the client, swapped whole on `refresh`.
@@ -302,7 +294,7 @@ impl Vault {
         &self,
         exchange: &dyn Exchange,
         settings: &[u8],
-    ) -> Option<SecretResult<Vec<u8>>> {
+    ) -> Option<SecretResult<cred::Held<Vec<u8>>>> {
         match settings_of(settings) {
             Err(e) => Some(Err(e)),
             Ok(s) => self.client().resolve(&s, exchange),
@@ -358,7 +350,7 @@ impl SafeSlot for Resolve {
                 }
                 Outcome::Pending
             }
-            Some(Ok(material)) => resolved(input, &mut out, cred::Held::new(material)),
+            Some(Ok(material)) => resolved(input, &mut out, material),
             Some(Err(e)) => failed(&mut out, e),
         }
     }

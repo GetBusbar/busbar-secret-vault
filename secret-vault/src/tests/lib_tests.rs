@@ -45,7 +45,7 @@ fn a_non_string_field_is_refused_not_ignored() {
         json!({ "path": "kv/data/x", "field": 7 }),
         json!({ "path": "kv/data/x", "field": null }),
     ] {
-        let err = parse_reference(&settings(s)).unwrap_err();
+        let err = parse_reference(&settings(s)).err().unwrap();
         assert_eq!(err.kind, SecretErrorKind::Invalid);
         assert_eq!(
             err.message,
@@ -57,7 +57,7 @@ fn a_non_string_field_is_refused_not_ignored() {
 #[test]
 fn missing_path_is_rejected() {
     let s = settings(json!({ "field": "api_key" }));
-    let err = parse_reference(&s).unwrap_err();
+    let err = parse_reference(&s).err().unwrap();
     assert_eq!(err.kind, SecretErrorKind::Invalid);
     assert!(err.message.contains("path"), "{}", err.message);
 }
@@ -65,7 +65,7 @@ fn missing_path_is_rejected() {
 #[test]
 fn path_with_no_field_and_no_hash_is_rejected() {
     let s = settings(json!({ "path": "kv/data/openai" }));
-    let err = parse_reference(&s).unwrap_err();
+    let err = parse_reference(&s).err().unwrap();
     assert_eq!(err.kind, SecretErrorKind::Invalid);
     assert!(err.message.contains("field to extract"), "{}", err.message);
 }
@@ -73,7 +73,7 @@ fn path_with_no_field_and_no_hash_is_rejected() {
 #[test]
 fn empty_field_after_hash_is_rejected() {
     let s = settings(json!({ "path": "kv/data/openai#" }));
-    let err = parse_reference(&s).unwrap_err();
+    let err = parse_reference(&s).err().unwrap();
     assert_eq!(err.kind, SecretErrorKind::Invalid);
     assert!(err.message.contains("field to extract"), "{}", err.message);
 }
@@ -81,7 +81,7 @@ fn empty_field_after_hash_is_rejected() {
 #[test]
 fn empty_explicit_field_is_rejected() {
     let s = settings(json!({ "path": "kv/data/openai", "field": "" }));
-    let err = parse_reference(&s).unwrap_err();
+    let err = parse_reference(&s).err().unwrap();
     assert_eq!(err.kind, SecretErrorKind::Invalid);
     assert!(err.message.contains("must not be empty"), "{}", err.message);
 }
@@ -150,7 +150,7 @@ fn roundtrip_against_live_vault() {
         .resolve(&hash_settings, &ex)
         .unwrap()
         .expect("resolve api_key");
-    assert_eq!(got, b"sk-live-abc123");
+    assert_eq!(crate::custody_support::material(got), b"sk-live-abc123");
 
     let explicit_settings =
         settings(json!({ "path": "secret/data/busbar-test", "field": "org_id" }));
@@ -158,10 +158,10 @@ fn roundtrip_against_live_vault() {
         .resolve(&explicit_settings, &ex)
         .unwrap()
         .expect("resolve org_id");
-    assert_eq!(got, b"org-xyz");
+    assert_eq!(crate::custody_support::material(got), b"org-xyz");
 
     let missing = settings(json!({ "path": "secret/data/no-such-secret#x" }));
-    let err = module.resolve(&missing, &ex).unwrap().unwrap_err();
+    let err = module.resolve(&missing, &ex).unwrap().err().unwrap();
     assert_eq!(err.kind, SecretErrorKind::NotFound);
     assert!(
         err.message.contains("404"),
@@ -170,7 +170,7 @@ fn roundtrip_against_live_vault() {
     );
 
     let bad_field = settings(json!({ "path": "secret/data/busbar-test#no_such_field" }));
-    let err = module.resolve(&bad_field, &ex).unwrap().unwrap_err();
+    let err = module.resolve(&bad_field, &ex).unwrap().err().unwrap();
     assert_eq!(err.kind, SecretErrorKind::NotFound);
     assert!(
         err.message.contains("no_such_field"),
@@ -179,7 +179,7 @@ fn roundtrip_against_live_vault() {
     );
 
     let bad = VaultClient::new(&cfg(&addr), b"not-a-real-token");
-    let err = bad.resolve(&hash_settings, &ex).unwrap().unwrap_err();
+    let err = bad.resolve(&hash_settings, &ex).unwrap().err().unwrap();
     assert_eq!(err.kind, SecretErrorKind::Denied);
     assert!(
         err.message.contains("403"),
@@ -194,7 +194,7 @@ const TOKEN: &[u8] = b"s.never-in-a-message";
 fn cfg(addr: &str) -> VaultConfig {
     VaultConfig {
         addr: addr.to_string(),
-        token: json!({ "env": "VAULT_TOKEN" }),
+        token: json!({ "env": "VAULT_TOKEN" }).into(),
         ca_cert_pem: None,
         timeout_secs: 10,
     }
@@ -214,7 +214,7 @@ impl Exchange for ReqwestExchange {
         let url = format!("{}{}", parsed.origin().ascii_serialization(), r.target);
         let mut req = client.get(url);
         for (n, v) in &r.fields {
-            req = req.header(*n, v.as_slice());
+            req = req.header(*n, crate::custody_support::token(v));
         }
         Exchanged::Done(match req.send() {
             Ok(resp) => {
@@ -229,7 +229,7 @@ impl Exchange for ReqwestExchange {
                 let body = body[..body_len.min(r.body_cap)].to_vec();
                 Ok(Response {
                     status,
-                    body,
+                    body: busbar_contract::abi::sdk::cred::Held::new(body),
                     body_len,
                 })
             }
@@ -240,7 +240,7 @@ impl Exchange for ReqwestExchange {
 
 /// An exchange answering one canned response (or transport failure), recording the request.
 struct Canned {
-    answer: Result<Response, ConnFailure>,
+    answer: std::sync::Mutex<Option<Result<Response, ConnFailure>>>,
     seen: std::sync::Mutex<Vec<String>>,
 }
 
@@ -248,14 +248,14 @@ impl Canned {
     fn status(status: u16, body: &str) -> Self {
         Self::of(Ok(Response {
             status,
-            body: body.as_bytes().to_vec(),
+            body: busbar_contract::abi::sdk::cred::Held::new(body.as_bytes().to_vec()),
             body_len: body.len(),
         }))
     }
 
     fn of(answer: Result<Response, ConnFailure>) -> Self {
         Self {
-            answer,
+            answer: std::sync::Mutex::new(Some(answer)),
             seen: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -267,7 +267,13 @@ impl Exchange for Canned {
             .lock()
             .unwrap()
             .push(format!("{} {}", r.method, r.url));
-        Exchanged::Done(self.answer.clone())
+        Exchanged::Done(
+            self.answer
+                .lock()
+                .unwrap()
+                .take()
+                .expect("one canned exchange"),
+        )
     }
 }
 
@@ -286,7 +292,7 @@ fn run(ex: &dyn Exchange, reference: serde_json::Value) -> SecretResult<Vec<u8>>
             e.message
         );
     }
-    r
+    r.map(crate::custody_support::material)
 }
 
 fn kv2(data: serde_json::Value) -> String {
@@ -302,8 +308,12 @@ fn the_request_is_1_5_5s_get_with_the_token_header() {
         r.url, URL,
         "trailing slash trimmed once, leading slash of the path trimmed"
     );
-    let fields: Vec<(&str, &[u8])> = r.fields.iter().map(|(n, v)| (*n, v.as_slice())).collect();
-    assert_eq!(fields, vec![("X-Vault-Token", TOKEN)]);
+    let fields: Vec<(&str, Vec<u8>)> = r
+        .fields
+        .iter()
+        .map(|(n, v)| (*n, crate::custody_support::token(v)))
+        .collect();
+    assert_eq!(fields, vec![("X-Vault-Token", TOKEN.to_vec())]);
     assert_eq!(r.timeout_ms, 10_000);
     assert_eq!(r.body_cap, MAX_VAULT_RESPONSE_BYTES + 1);
     assert!(r.trust_pem.is_none());
@@ -353,7 +363,7 @@ fn a_field_is_read_as_its_string_bytes_or_its_json_text() {
 #[test]
 fn a_malformed_reference_is_refused_before_any_exchange() {
     let ex = Canned::status(200, "{}");
-    let e = run(&ex, json!({ "path": "kv/data/openai" })).unwrap_err();
+    let e = run(&ex, json!({ "path": "kv/data/openai" })).err().unwrap();
     assert_eq!(e.kind, SecretErrorKind::Invalid);
     assert!(ex.seen.lock().unwrap().is_empty());
 }
@@ -426,7 +436,7 @@ fn response_classes_report_kind_and_safe_context() {
             Canned::status(200, "not json"),
             SecretErrorKind::Internal,
             format!(
-                "Vault response for path {p} is not valid JSON: expected ident at line 1 column 2"
+                "Vault response for path {p} is not valid JSON: it is not well-formed JSON (line 1, column 2; the decoder's text is withheld)"
             ),
         ),
         (
@@ -444,7 +454,9 @@ fn response_classes_report_kind_and_safe_context() {
         ),
     ];
     for (ex, kind, text) in cases {
-        let e = run(&ex, json!({ "path": "kv/data/openai#api_key" })).unwrap_err();
+        let e = run(&ex, json!({ "path": "kv/data/openai#api_key" }))
+            .err()
+            .unwrap();
         assert_eq!((e.kind, e.message.as_str()), (kind, text.as_str()));
     }
 }
@@ -456,7 +468,8 @@ fn no_text_of_the_reply_reaches_a_refusal() {
             &Canned::status(status, "REPLY-CANARY sk-live-123"),
             json!({ "path": "kv/data/openai#k" }),
         )
-        .unwrap_err();
+        .err()
+        .unwrap();
         assert_eq!(e.kind, SecretErrorKind::Internal);
         assert!(!e.message.contains("REPLY-CANARY"), "{}", e.message);
         assert!(!e.message.contains("sk-live"), "{}", e.message);
@@ -465,7 +478,8 @@ fn no_text_of_the_reply_reaches_a_refusal() {
         &Canned::status(200, &kv2(json!({ "FIELD-CANARY": "x" }))),
         json!({ "path": "kv/data/openai#k" }),
     )
-    .unwrap_err();
+    .err()
+    .unwrap();
     assert_eq!(e.kind, SecretErrorKind::NotFound);
     assert!(!e.message.contains("FIELD-CANARY"), "{}", e.message);
 }
@@ -478,7 +492,8 @@ fn a_redirect_is_refused_saying_it_is_not_followed() {
         &Canned::status(307, "<a href=\"https://active:8200/\">"),
         json!({ "path": "kv/data/openai#k" }),
     )
-    .unwrap_err();
+    .err()
+    .unwrap();
     assert_eq!(e.kind, SecretErrorKind::Internal);
     assert!(
         e.message.ends_with(
@@ -499,7 +514,8 @@ fn an_empty_field_is_refused_never_resolved_empty() {
         &Canned::status(200, &kv2(json!({ "k": "" }))),
         json!({ "path": "kv/data/openai#k" }),
     )
-    .unwrap_err();
+    .err()
+    .unwrap();
     assert_eq!(e.kind, SecretErrorKind::Invalid);
     assert_eq!(
         e.message,
@@ -512,14 +528,17 @@ fn an_empty_field_is_refused_never_resolved_empty() {
 /// are refused before an exchange.
 #[test]
 fn a_blank_path_or_another_setting_is_refused_before_any_request() {
-    let blank = parse_reference(&settings(json!({ "path": "  ", "field": "k" }))).unwrap_err();
+    let blank = parse_reference(&settings(json!({ "path": "  ", "field": "k" })))
+        .err()
+        .unwrap();
     assert_eq!(blank.kind, SecretErrorKind::Invalid);
     assert_eq!(
         blank.message,
         "`path` in secret reference settings must not be blank"
     );
-    let other =
-        parse_reference(&settings(json!({ "path": "kv/data/x#k", "fields": "k" }))).unwrap_err();
+    let other = parse_reference(&settings(json!({ "path": "kv/data/x#k", "fields": "k" })))
+        .err()
+        .unwrap();
     assert_eq!(other.kind, SecretErrorKind::Invalid);
     assert_eq!(
         other.message,
@@ -544,7 +563,7 @@ fn open_time_settings_that_could_never_serve_are_refused_naming_the_key() {
         "https://v:8200#frag",
     ] {
         let cfg = json!({ "addr": bad, "token": { "env": "T" } }).to_string();
-        let e = parse_config(cfg.as_bytes()).unwrap_err();
+        let e = parse_config(cfg.as_bytes()).err().unwrap();
         assert_eq!(e, addr, "{bad}");
     }
     for good in ["http://v", "https://u:p@v:8200/", "https://v:8200/prefix"] {
@@ -553,13 +572,13 @@ fn open_time_settings_that_could_never_serve_are_refused_naming_the_key() {
     }
     let cfg = json!({ "addr": "https://v", "token": { "env": "T" }, "ca_cert_pem": "not a pem" });
     assert_eq!(
-        parse_config(cfg.to_string().as_bytes()).unwrap_err(),
+        parse_config(cfg.to_string().as_bytes()).err().unwrap(),
         "invalid hashicorp-vault plugin config: `ca_cert_pem` holds no PEM certificate \
          (-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----)"
     );
     let cfg = json!({ "addr": "https://v", "token": { "env": "T" }, "timeout_secs": 0 });
     assert_eq!(
-        parse_config(cfg.to_string().as_bytes()).unwrap_err(),
+        parse_config(cfg.to_string().as_bytes()).err().unwrap(),
         "invalid hashicorp-vault plugin config: `timeout_secs` must be at least 1"
     );
 }
@@ -572,7 +591,7 @@ fn a_truncated_trailing_certificate_is_refused() {
     let pem = format!("{good}-----BEGIN CERTIFICATE-----\nMIIB\n");
     let cfg = json!({ "addr": "https://v", "token": { "env": "T" }, "ca_cert_pem": pem });
     assert_eq!(
-        parse_config(cfg.to_string().as_bytes()).unwrap_err(),
+        parse_config(cfg.to_string().as_bytes()).err().unwrap(),
         "invalid hashicorp-vault plugin config: invalid ca_cert_pem: certificate 2 has no \
          -----END CERTIFICATE----- line"
     );
@@ -580,7 +599,7 @@ fn a_truncated_trailing_certificate_is_refused() {
     let cfg = json!({ "addr": "https://v", "token": { "env": "T" },
         "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n" });
     assert_eq!(
-        parse_config(cfg.to_string().as_bytes()).unwrap_err(),
+        parse_config(cfg.to_string().as_bytes()).err().unwrap(),
         "invalid hashicorp-vault plugin config: invalid ca_cert_pem: certificate 1 has no \
          -----END CERTIFICATE----- line"
     );
@@ -589,14 +608,18 @@ fn a_truncated_trailing_certificate_is_refused() {
 /// A path that is blank once its `#field` suffix is cut off is blank, not a request to `/v1/%20%20%20`.
 #[test]
 fn a_blank_path_with_a_field_suffix_is_refused() {
-    let e = parse_reference(&settings(json!({ "path": "   #api_key" }))).unwrap_err();
+    let e = parse_reference(&settings(json!({ "path": "   #api_key" })))
+        .err()
+        .unwrap();
     assert_eq!(e.kind, SecretErrorKind::Invalid);
     assert_eq!(
         e.message,
         "`path` in secret reference settings must not be blank"
     );
     // An empty path before `#` is blank too: the field is present, the path is what is missing.
-    let e = parse_reference(&settings(json!({ "path": "#api_key" }))).unwrap_err();
+    let e = parse_reference(&settings(json!({ "path": "#api_key" })))
+        .err()
+        .unwrap();
     assert_eq!(e.kind, SecretErrorKind::Invalid);
     assert_eq!(
         e.message,
@@ -611,7 +634,8 @@ fn a_429_is_unavailable() {
         &Canned::status(429, "REPLY-CANARY"),
         json!({ "path": "kv/data/openai#k" }),
     )
-    .unwrap_err();
+    .err()
+    .unwrap();
     assert_eq!(e.kind, SecretErrorKind::Unavailable);
     assert!(!e.message.contains("REPLY-CANARY"), "{}", e.message);
 }
@@ -622,7 +646,7 @@ fn a_429_is_unavailable() {
 fn debug_prints_no_body_token_or_userinfo() {
     let r = Response {
         status: 200,
-        body: b"BODY-CANARY".to_vec(),
+        body: busbar_contract::abi::sdk::cred::Held::new(b"BODY-CANARY".to_vec()),
         body_len: 11,
     };
     assert!(!format!("{r:?}").contains("BODY-CANARY"));
@@ -638,10 +662,12 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
     let cap = MAX_VAULT_RESPONSE_BYTES;
     let over = Canned::of(Ok(Response {
         status: 200,
-        body: vec![b' '; cap + 1],
+        body: busbar_contract::abi::sdk::cred::Held::new(vec![b' '; cap + 1]),
         body_len: cap + 1,
     }));
-    let e = run(&over, json!({ "path": "kv/data/openai#k" })).unwrap_err();
+    let e = run(&over, json!({ "path": "kv/data/openai#k" }))
+        .err()
+        .unwrap();
     assert_eq!(e.kind, SecretErrorKind::Unavailable);
     assert_eq!(
         e.message,
@@ -650,12 +676,13 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
 
     let reported = Canned::of(Ok(Response {
         status: 200,
-        body: vec![b' '; 10],
+        body: busbar_contract::abi::sdk::cred::Held::new(vec![b' '; 10]),
         body_len: cap + 7,
     }));
     assert_eq!(
         run(&reported, json!({ "path": "kv/data/openai#k" }))
-            .unwrap_err()
+            .err()
+            .unwrap()
             .kind,
         SecretErrorKind::Unavailable
     );
@@ -665,7 +692,7 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
     let at = Canned::of(Ok(Response {
         status: 200,
         body_len: at.len(),
-        body: at,
+        body: busbar_contract::abi::sdk::cred::Held::new(at),
     }));
     assert_eq!(
         run(&at, json!({ "path": "kv/data/openai#k" })).unwrap(),
@@ -674,12 +701,13 @@ fn the_body_cap_refuses_over_and_accepts_at_the_cap() {
 
     let big404 = Canned::of(Ok(Response {
         status: 404,
-        body: vec![],
+        body: busbar_contract::abi::sdk::cred::Held::new(vec![]),
         body_len: cap * 2,
     }));
     assert_eq!(
         run(&big404, json!({ "path": "kv/data/openai#k" }))
-            .unwrap_err()
+            .err()
+            .unwrap()
             .kind,
         SecretErrorKind::NotFound
     );
@@ -693,13 +721,13 @@ fn the_body_cap_is_judged_before_any_other_non_2xx() {
     let over = |status| {
         Canned::of(Ok(Response {
             status,
-            body: vec![b'x'; cap + 1],
+            body: busbar_contract::abi::sdk::cred::Held::new(vec![b'x'; cap + 1]),
             body_len: cap + 1,
         }))
     };
     let reference = || json!({ "path": "kv/data/openai#k" });
     for status in [400, 418] {
-        let e = run(&over(status), reference()).unwrap_err();
+        let e = run(&over(status), reference()).err().unwrap();
         assert_eq!(e.kind, SecretErrorKind::Unavailable, "{status}");
         assert_eq!(
             e.message,
@@ -709,9 +737,9 @@ fn the_body_cap_is_judged_before_any_other_non_2xx() {
             "{status}"
         );
     }
-    let e = run(&over(403), reference()).unwrap_err();
+    let e = run(&over(403), reference()).err().unwrap();
     assert_eq!(e.kind, SecretErrorKind::Denied);
-    let e = run(&over(503), reference()).unwrap_err();
+    let e = run(&over(503), reference()).err().unwrap();
     assert_eq!(e.kind, SecretErrorKind::Unavailable);
     assert!(
         e.message.starts_with("Vault server error reading path"),
@@ -735,7 +763,9 @@ impl Exchange for PendsOnce {
         } else {
             Exchanged::Done(Ok(Response {
                 status: 200,
-                body: kv2(json!({ "k": "late" })).into_bytes(),
+                body: busbar_contract::abi::sdk::cred::Held::new(
+                    kv2(json!({ "k": "late" })).into_bytes(),
+                ),
                 body_len: kv2(json!({ "k": "late" })).len(),
             }))
         }
@@ -750,30 +780,35 @@ fn a_pending_exchange_pends_the_resolve_then_answers_on_resume() {
     let c = VaultClient::new(&cfg(ADDR), TOKEN);
     let s = settings(json!({ "path": "kv/data/openai#k" }));
     assert!(c.resolve(&s, &ex).is_none(), "pending");
-    assert_eq!(c.resolve(&s, &ex).unwrap().unwrap(), b"late");
+    assert_eq!(
+        crate::custody_support::material(c.resolve(&s, &ex).unwrap().unwrap()),
+        b"late"
+    );
 }
 
 #[test]
 fn config_refusals_name_the_plugin_and_invalid_setting() {
     assert_eq!(
-        parse_config(b"  \n").unwrap_err(),
+        parse_config(b"  \n").err().unwrap(),
         "hashicorp-vault plugin requires config (addr, token); none provided"
     );
     assert_eq!(
-        parse_config(b"").unwrap_err(),
+        parse_config(b"").err().unwrap(),
         "hashicorp-vault plugin requires config (addr, token); none provided"
     );
-    let e = parse_config(b"{ this is not json").unwrap_err();
+    let e = parse_config(b"{ this is not json").err().unwrap();
     assert!(
         e.contains("invalid hashicorp-vault plugin config") && e.contains("key must be a string"),
         "{e}"
     );
-    let e = parse_config(br#"{"addr":"http://v"}"#).unwrap_err();
+    let e = parse_config(br#"{"addr":"http://v"}"#).err().unwrap();
     assert!(e.contains("missing field `token`"), "{e}");
-    let e = parse_config(br#"{"token":"t"}"#).unwrap_err();
+    let e = parse_config(br#"{"token":"t"}"#).err().unwrap();
     assert!(e.contains("missing field `addr`"), "{e}");
-    let e = parse_config(br#"{"addr":"http://v","token":"t","tls":true}"#).unwrap_err();
-    assert!(e.contains("unknown field `tls`"), "{e}");
+    let e = parse_config(br#"{"addr":"http://v","token":"t","tls":true}"#)
+        .err()
+        .unwrap();
+    assert!(e.contains("unknown configuration field"), "{e}");
     let c = parse_config(br#"{"addr":"http://v","token":{"env":"T"},"timeout_secs":3}"#).unwrap();
     assert_eq!(
         (c.addr.as_str(), c.timeout_secs, c.ca_cert_pem.as_deref()),
@@ -791,8 +826,12 @@ fn config_refusals_name_the_plugin_and_invalid_setting() {
 fn guarded_config_keeps_root_duplicate_refusal_and_nested_value_semantics() {
     let duplicate =
         parse_config(br#"{"addr":"http://first","token":{"env":"T"},"ad\u0064r":"http://second"}"#)
-            .unwrap_err();
-    assert!(duplicate.contains("duplicate field `addr`"), "{duplicate}");
+            .err()
+            .unwrap();
+    assert!(
+        duplicate.contains("a field is missing or has the wrong type"),
+        "{duplicate}"
+    );
     let nested =
         parse_config(br#"{"addr":"http://v","token":{"nested":[{"k":"lost","\u006b":"kept"}]}}"#)
             .unwrap();
@@ -852,7 +891,7 @@ fn the_framed_target_percent_encodes_what_a_uri_cannot_hold() {
             &ex,
         )
         .unwrap();
-    assert_eq!(got.unwrap(), b"v");
+    assert_eq!(crate::custody_support::material(got.unwrap()), b"v");
     assert_eq!(target("kv/data/a#b"), "/v1/kv/data/a");
 
     assert_eq!(
@@ -868,7 +907,8 @@ fn an_addr_that_is_no_url_is_refused_before_any_exchange() {
     let e = c
         .resolve(&settings(json!({ "path": "kv/data/x#k" })), &ex)
         .unwrap()
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert_eq!(e.kind, SecretErrorKind::Unavailable);
     let url = "vault.internal:8200/v1/kv/data/x";
     assert!(
@@ -911,7 +951,8 @@ fn addr_userinfo_is_never_printed() {
         let e = c
             .resolve(&reference, &Canned::status(404, "{}"))
             .unwrap()
-            .unwrap_err();
+            .err()
+            .unwrap();
         assert!(e.message.contains(shown), "{}", e.message);
         assert!(!e.message.contains("s3cret"), "{}", e.message);
         assert!(!format!("{c:?}").contains("s3cret"));
@@ -942,7 +983,7 @@ fn settings_of_reads_an_object_and_refuses_anything_else() {
     assert!(settings_of(b"").unwrap().is_empty());
     assert_eq!(settings_of(br#"{"path":"p"}"#).unwrap()["path"], "p");
     assert_eq!(
-        settings_of(b"[1]").unwrap_err().kind,
+        settings_of(b"[1]").err().unwrap().kind,
         SecretErrorKind::Invalid
     );
 }
@@ -960,7 +1001,8 @@ fn a_non_2xx_kv_body_never_reaches_the_refusal() {
             &Canned::status(412, &body),
             json!({ "path": "kv/data/openai#k" }),
         )
-        .unwrap_err();
+        .err()
+        .unwrap();
         assert!(
             !e.message.contains(CANARY),
             "the refusal carried a secret: {}",
@@ -978,7 +1020,8 @@ fn a_non_2xx_kv_body_never_reaches_the_refusal() {
         &Canned::status(400, r#"{"errors":["permission denied"]}"#),
         json!({ "path": "kv/data/openai#k" }),
     )
-    .unwrap_err();
+    .err()
+    .unwrap();
     assert!(!e.message.contains("permission denied"), "{}", e.message);
     assert!(
         e.message
@@ -995,7 +1038,9 @@ fn a_non_2xx_kv_body_never_reaches_the_refusal() {
 fn debug_of_a_response_or_the_config_carries_no_secret() {
     let r = Response {
         status: 200,
-        body: format!(r#"{{"data":{{"data":{{"k":"{CANARY}"}}}}}}"#).into_bytes(),
+        body: busbar_contract::abi::sdk::cred::Held::new(
+            format!(r#"{{"data":{{"data":{{"k":"{CANARY}"}}}}}}"#).into_bytes(),
+        ),
         body_len: 40,
     };
     let c = parse_config(
@@ -1044,14 +1089,14 @@ fn config_with_ca(pem: &str) -> Result<VaultConfig, String> {
 fn a_ca_cert_pem_that_does_not_decode_is_refused() {
     let junk = "-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----";
     assert_eq!(
-        config_with_ca(junk).unwrap_err(),
+        config_with_ca(junk).err().unwrap(),
         "invalid hashicorp-vault plugin config: invalid ca_cert_pem: certificate 1 is not valid \
          base64"
     );
 
     let not_der = "-----BEGIN CERTIFICATE-----\naGVsbG8gd29ybGQh\n-----END CERTIFICATE-----";
     assert_eq!(
-        config_with_ca(not_der).unwrap_err(),
+        config_with_ca(not_der).err().unwrap(),
         "invalid hashicorp-vault plugin config: invalid ca_cert_pem: certificate 1 is not DER (it \
          does not start with a SEQUENCE of the stated length)"
     );
@@ -1062,7 +1107,7 @@ fn a_ca_cert_pem_that_does_not_decode_is_refused() {
     for (name, b64) in [("short form", "MAD//w=="), ("long form", "MIEBAP8=")] {
         let pem = format!("-----BEGIN CERTIFICATE-----\n{b64}\n-----END CERTIFICATE-----");
         assert_eq!(
-            config_with_ca(&pem).unwrap_err(),
+            config_with_ca(&pem).err().unwrap(),
             "invalid hashicorp-vault plugin config: invalid ca_cert_pem: certificate 1 is not DER \
              (it does not start with a SEQUENCE of the stated length)",
             "trailing bytes after a {name} SEQUENCE"
@@ -1083,14 +1128,14 @@ fn a_ca_cert_pem_that_does_not_decode_is_refused() {
         ("an alphabet byte in a length-4 body", "MA!A"),
     ] {
         assert_eq!(
-            config_with_ca(&block(b64)).unwrap_err(),
+            config_with_ca(&block(b64)).err().unwrap(),
             not_base64,
             "{name}"
         );
     }
     // 0x30 0x80: an indefinite length is not DER.
     assert_eq!(
-        config_with_ca(&block("MIA=")).unwrap_err(),
+        config_with_ca(&block("MIA=")).err().unwrap(),
         not_der,
         "indefinite length"
     );
@@ -1117,7 +1162,7 @@ fn a_ca_cert_pem_that_does_not_decode_is_refused() {
         }
     }
     assert_eq!(
-        config_with_ca(&block(&enc)).unwrap_err(),
+        config_with_ca(&block(&enc)).err().unwrap(),
         not_der,
         "trailing DER byte"
     );
@@ -1125,7 +1170,8 @@ fn a_ca_cert_pem_that_does_not_decode_is_refused() {
     let second =
         format!("{REAL_CERT_PEM}-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----");
     assert!(config_with_ca(&second)
-        .unwrap_err()
+        .err()
+        .unwrap()
         .contains("certificate 2"));
     let empty = "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----";
     assert!(config_with_ca(empty).is_err(), "an empty block");
@@ -1144,7 +1190,7 @@ fn a_real_certificate_is_accepted_alone_and_in_a_bundle() {
 fn an_end_marker_before_the_begin_marker_is_refused() {
     let reversed = "-----END CERTIFICATE-----\nMAA=\n-----BEGIN CERTIFICATE-----";
     assert_eq!(
-        config_with_ca(reversed).unwrap_err(),
+        config_with_ca(reversed).err().unwrap(),
         "invalid hashicorp-vault plugin config: invalid ca_cert_pem: certificate 1 has no \
          -----END CERTIFICATE----- line"
     );
@@ -1190,7 +1236,9 @@ fn encode_path_writes_every_byte_a_uri_cannot_hold() {
 fn a_reference_splits_on_the_last_hash_and_refuses_an_empty_path() {
     let (p, f) = parse_reference(&settings(json!({ "path": "kv/data/a#b#c" }))).unwrap();
     assert_eq!((p.as_str(), f.as_str()), ("kv/data/a#b", "c"));
-    let e = parse_reference(&settings(json!({ "path": "#k" }))).unwrap_err();
+    let e = parse_reference(&settings(json!({ "path": "#k" })))
+        .err()
+        .unwrap();
     assert_eq!(e.kind, SecretErrorKind::Invalid);
 }
 
@@ -1203,7 +1251,8 @@ fn status_classes_are_judged_at_their_edges() {
             &Canned::status(s, ""),
             json!({ "path": "kv/data/openai#k" }),
         )
-        .unwrap_err();
+        .err()
+        .unwrap();
         assert_eq!(e.kind, SecretErrorKind::Internal, "{s}");
         assert!(
             e.message.contains("a redirect is not followed; set `addr`"),
@@ -1215,14 +1264,16 @@ fn status_classes_are_judged_at_their_edges() {
         &Canned::status(599, ""),
         json!({ "path": "kv/data/openai#k" }),
     )
-    .unwrap_err();
+    .err()
+    .unwrap();
     assert_eq!(e.kind, SecretErrorKind::Unavailable);
     assert!(e.message.contains("Vault server error"), "{}", e.message);
     let e = run(
         &Canned::status(600, ""),
         json!({ "path": "kv/data/openai#k" }),
     )
-    .unwrap_err();
+    .err()
+    .unwrap();
     assert_eq!(e.kind, SecretErrorKind::Internal);
     assert!(!e.message.contains("server error"), "{}", e.message);
     for s in [200, 201] {
@@ -1238,7 +1289,8 @@ fn status_classes_are_judged_at_their_edges() {
         &Canned::status(204, ""),
         json!({ "path": "kv/data/openai#k" }),
     )
-    .unwrap_err();
+    .err()
+    .unwrap();
     assert_eq!(e.kind, SecretErrorKind::Internal);
     assert!(e.message.contains("is not valid JSON"), "{}", e.message);
 }
@@ -1278,7 +1330,7 @@ fn response_strings_and_non_string_material_keep_serde_json_semantics() {
             Ok(Response {
                 status: 200,
                 body_len: body.len(),
-                body: body.into_bytes(),
+                body: busbar_contract::abi::sdk::cred::Held::new(body.into_bytes()),
             }),
         )
         .unwrap();
@@ -1292,13 +1344,21 @@ fn response_strings_and_non_string_material_keep_serde_json_semantics() {
         r#"{"data":1e400,"data":{"data":-9223372036854775809,"data":{"k":"kept"}}}"#,
     ] {
         let selected =
-            response_json::select(body.as_bytes(), "k", response_json::Unwatched).unwrap();
-        assert!(matches!(selected, response_json::Selected::Text(text) if text.as_str() == "kept"));
+            cred::select_json(Held::new(body.as_bytes().to_vec()), &["data", "data", "k"]).unwrap();
+        let SelectedJson::Value(text) = selected else {
+            panic!("selected value")
+        };
+        assert_eq!(crate::custody_support::material(text), b"kept");
     }
     let body = br#"{"data":{"data":{"k":{"$serde_json::private::Number":"secret"}}}}"#;
-    let selected = response_json::select(body, "k", response_json::Unwatched).unwrap();
-    assert!(matches!(selected, response_json::Selected::Rendered(text)
-        if text.as_slice() == br#"{"$serde_json::private::Number":"secret"}"#));
+    let selected = cred::select_json(Held::new(body.to_vec()), &["data", "data", "k"]).unwrap();
+    let SelectedJson::Value(text) = selected else {
+        panic!("selected value")
+    };
+    assert_eq!(
+        crate::custody_support::material(text),
+        br#"{"$serde_json::private::Number":"secret"}"#
+    );
 }
 
 #[test]
@@ -1333,10 +1393,11 @@ fn invalid_response_strings_numbers_and_nesting_are_still_refused() {
             Ok(Response {
                 status: 200,
                 body_len: body.len(),
-                body,
+                body: busbar_contract::abi::sdk::cred::Held::new(body),
             }),
         )
-        .unwrap_err();
+        .err()
+        .unwrap();
         assert_eq!(error.kind, SecretErrorKind::Internal);
         assert!(error.message.contains("is not valid JSON"));
     }
@@ -1355,7 +1416,7 @@ fn invalid_response_strings_numbers_and_nesting_are_still_refused() {
             Ok(Response {
                 status: 200,
                 body_len: body.len(),
-                body: body.into_bytes(),
+                body: busbar_contract::abi::sdk::cred::Held::new(body.into_bytes()),
             }),
         );
         match expected {
@@ -1363,7 +1424,7 @@ fn invalid_response_strings_numbers_and_nesting_are_still_refused() {
                 actual.unwrap(),
                 serde_json::to_vec(&value["data"]["data"]["k"]).unwrap()
             ),
-            Err(_) => assert_eq!(actual.unwrap_err().kind, SecretErrorKind::Internal),
+            Err(_) => assert_eq!(actual.err().unwrap().kind, SecretErrorKind::Internal),
         }
     }
 }
@@ -1371,7 +1432,9 @@ fn invalid_response_strings_numbers_and_nesting_are_still_refused() {
 #[test]
 fn a_null_field_is_refused_invalid_naming_the_field() {
     let ex = Canned::status(200, &kv2(json!({ "k": null })));
-    let e = run(&ex, json!({ "path": "kv/data/openai#k" })).unwrap_err();
+    let e = run(&ex, json!({ "path": "kv/data/openai#k" }))
+        .err()
+        .unwrap();
     assert_eq!(e.kind, SecretErrorKind::Invalid);
     assert!(format!("{e:?}{e}").contains("\"k\""), "{e}");
 }
@@ -1390,3 +1453,5 @@ fn selected_string_null_and_nested_nulls_remain_valid_material() {
         assert_eq!(got, expected);
     }
 }
+
+use crate::custody_support::judge;

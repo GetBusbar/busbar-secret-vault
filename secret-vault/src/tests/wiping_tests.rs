@@ -29,22 +29,37 @@ const VALUE: &str = "CANARY-VALUE-91c2";
 
 #[derive(Clone, Copy)]
 pub(super) struct Watching;
-impl crate::response_json::Custody for Watching {
-    fn held(self, what: crate::response_json::Held, bytes: &[u8]) {
-        use crate::response_json::Held;
-        probe::watch(
-            match what {
-                Held::View => "parse view",
-                Held::Key => "parsed key",
-                Held::Value => "parsed value",
-            },
-            bytes,
-        );
+fn observe_json(what: &'static str, bytes: &[u8]) {
+    probe::watch(what, bytes);
+}
+
+trait WatchedClient {
+    fn resolve_with(
+        &self,
+        settings: &serde_json::Map<String, serde_json::Value>,
+        exchange: &dyn Exchange,
+        _: Watching,
+    ) -> Option<busbar_contract::secret::SecretResult<Vec<u8>>>;
+}
+impl WatchedClient for VaultClient {
+    fn resolve_with(
+        &self,
+        settings: &serde_json::Map<String, serde_json::Value>,
+        exchange: &dyn Exchange,
+        _: Watching,
+    ) -> Option<busbar_contract::secret::SecretResult<Vec<u8>>> {
+        busbar_contract::abi::sdk::test_support::chip::with_json_observer(observe_json, || {
+            self.resolve(settings, exchange)
+                .map(|r| r.map(crate::custody_support::material))
+        })
     }
 }
 
 fn parse_config_observed(bytes: &[u8]) -> Result<crate::VaultConfig, String> {
-    let config = crate::parse_config_with(bytes, Watching)?;
+    let config =
+        busbar_contract::abi::sdk::test_support::chip::with_json_observer(observe_json, || {
+            crate::parse_config(bytes)
+        })?;
     watch_config(&config);
     Ok(config)
 }
@@ -78,18 +93,16 @@ struct Moves {
 impl Exchange for Moves {
     fn exchange(&self, request: &Request) -> Exchanged {
         let token = &request.fields[0].1;
-        assert_eq!(
-            token.as_slice(),
-            TOKEN,
-            "the actual token reaches the request"
-        );
-        probe::watch("token", token.as_slice());
+        assert_eq!(crate::custody_support::token(token), TOKEN);
+        busbar_contract::abi::sdk::test_support::chip::observe_credential(token, |bytes| {
+            probe::watch("token", bytes)
+        });
         let body = self.body.borrow_mut().take().expect("one exchange");
         probe::watch("response body", &body);
         Exchanged::Done(Ok(Response {
             status: self.status,
             body_len: body.len(),
-            body,
+            body: busbar_contract::abi::sdk::cred::Held::new(body),
         }))
     }
 }
@@ -175,7 +188,7 @@ fn a_non_string_field_wipes_its_tree_and_its_rendered_material() {
 /// A numeric field is returned as rendered material; the key text of an object field and the number
 /// itself are copies in the freed tree and must be wiped like the strings.
 #[test]
-fn an_object_field_wipes_its_key_text_and_a_number_is_overwritten() {
+fn an_object_field_wipes_its_decoded_keys_and_rendered_number() {
     let exchange = Moves {
         status: 200,
         body: RefCell::new(Some(
@@ -200,17 +213,6 @@ fn an_object_field_wipes_its_key_text_and_a_number_is_overwritten() {
     observed
         .finish()
         .assert_wiped(&["token", "response body", "parsed key"]);
-
-    let mut v = serde_json::json!({ "n": 918273645012u64, "b": true, "a": [7, { "k": 1.5 }] });
-    super::wipe(&mut v);
-    assert_eq!(
-        v,
-        serde_json::json!({}),
-        "an object is emptied after its keys are wiped"
-    );
-    let mut n = serde_json::json!([918273645012u64, true, 1.5]);
-    super::wipe(&mut n);
-    assert_eq!(n, serde_json::json!([0, false, 0]));
 }
 
 #[test]
@@ -225,7 +227,8 @@ fn a_missing_field_wipes_the_parsed_tree_before_refusing() {
     let error = client
         .resolve_with(&settings, &exchange, Watching)
         .unwrap()
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert_eq!(error.kind, SecretErrorKind::NotFound);
     assert!(!error.message.contains(VALUE));
     drop(error);
@@ -247,7 +250,8 @@ fn a_failed_parse_wipes_the_owned_response_body() {
     let error = client
         .resolve_with(&settings, &exchange, Watching)
         .unwrap()
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert_eq!(error.kind, SecretErrorKind::Internal);
     assert!(!error.message.contains(VALUE));
     drop(error);
@@ -267,7 +271,8 @@ fn a_refusal_before_parsing_still_wipes_the_response_body() {
     let error = client
         .resolve_with(&settings, &exchange, Watching)
         .unwrap()
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert_eq!(error.kind, SecretErrorKind::Denied);
     assert!(!error.message.contains(VALUE));
     drop(error);
@@ -280,9 +285,11 @@ fn giving_up_a_pending_resolve_wipes_the_clients_token() {
     struct Pending;
     impl Exchange for Pending {
         fn exchange(&self, request: &Request) -> Exchanged {
-            let token = request.fields[0].1.as_slice();
-            assert_eq!(token, TOKEN);
-            probe::watch("token", token);
+            let token = &request.fields[0].1;
+            assert_eq!(crate::custody_support::token(token), TOKEN);
+            busbar_contract::abi::sdk::test_support::chip::observe_credential(token, |bytes| {
+                probe::watch("token", bytes)
+            });
             Exchanged::Pending
         }
     }
@@ -339,7 +346,8 @@ fn malformed_nested_json_wipes_decoded_values_and_partial_escape_output() {
         let error = client
             .resolve_with(&settings, &exchange, Watching)
             .unwrap()
-            .unwrap_err();
+            .err()
+            .unwrap();
         assert_eq!(error.kind, SecretErrorKind::Internal);
         assert!(error.message.contains("is not valid JSON"));
         assert!(!error.message.contains(VALUE));
@@ -364,7 +372,8 @@ fn an_escaped_value_before_a_later_syntax_error_is_wiped() {
     let error = client
         .resolve_with(&settings, &exchange, Watching)
         .unwrap()
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert_eq!(error.kind, SecretErrorKind::Internal);
     assert!(!error.message.contains("CANARY"));
     drop(error);
@@ -407,7 +416,13 @@ fn partial_render_and_its_growth_allocations_are_observed_and_wiped() {
         "918273645,".repeat(64)
     );
     let observed = probe::Probe::start();
-    let result = crate::response_json::select(body.as_bytes(), "k", Watching);
+    let result =
+        busbar_contract::abi::sdk::test_support::chip::with_json_observer(observe_json, || {
+            busbar_contract::abi::sdk::cred::select_json(
+                busbar_contract::abi::sdk::cred::Held::new(body.as_bytes().to_vec()),
+                &["data", "data", "k"],
+            )
+        });
     assert!(result.is_err());
     drop(result);
     let report = observed.finish();

@@ -249,11 +249,19 @@ fn host(
         dispatcher
     }));
     let mut entries = Vec::new();
-    for (name, door) in [
-        ("tcp", busbar_transport_tcp::linked::MACRO_DOOR),
-        ("http", busbar_transport_http::door::MACRO_DOOR),
-    ] {
-        let row = LinkedRow::of_macro(door).expect("actual transport row states");
+    // The transport fixtures may pin an older SDK. Enter their published raw ABI, exactly
+    // as a dropped image does, instead of requiring Rust types from two revisions to match.
+    // Both functions return the actual static macro-built doors; the loader checks their ABI.
+    extern "C" fn tcp_door() -> *const busbar_contract::abi::mechanism::door::Door {
+        std::ptr::from_ref(busbar_transport_tcp::linked::door()).cast()
+    }
+    extern "C" fn http_door() -> *const busbar_contract::abi::mechanism::door::Door {
+        std::ptr::from_ref(busbar_transport_http::door::door()).cast()
+    }
+    let drivers: [(&str, busbar_contract::abi::sdk::door::RawDoorFn); 2] =
+        [("tcp", tcp_door), ("http", http_door)];
+    for (name, door) in drivers {
+        let row = LinkedRow::of_raw(door).expect("actual transport row states");
         let transport = load_linked::<Transport>(
             &row,
             Bind {
@@ -724,11 +732,12 @@ fn an_unfinished_reply_past_the_cap_preserves_the_actual_status_and_closes() {
                 &format!("{addr}/v1/kv/data/x"),
                 Ok(busbar_secret_vault::Response {
                     status,
-                    body: Vec::new(),
+                    body: busbar_contract::abi::sdk::cred::Held::new(Vec::new()),
                     body_len: cap + 2,
                 }),
             )
-            .unwrap_err();
+            .err()
+            .unwrap();
             assert_eq!(
                 answer.called.outcome,
                 Outcome::Failed,
@@ -1296,6 +1305,9 @@ fn ordinary_lifecycle_resolution_and_refused_refresh_preserve_the_vault_contract
                     }
                     Err(error) => panic!("Vault endpoint accept: {error}"),
                 };
+                // Accepted sockets can inherit O_NONBLOCK on macOS; this fixture uses
+                // blocking reads/writes with explicit deadlines after the nonblocking accept.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(10)))
                     .unwrap();

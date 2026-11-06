@@ -56,15 +56,14 @@
 #![cfg_attr(test, deny(unsafe_code))]
 
 use busbar_contract::abi::sdk::conn::ConnFailure;
+use busbar_contract::abi::sdk::cred::{self, Cred, Held, SelectedJson, SettingsValue};
 use busbar_contract::secret::{SecretModuleError, SecretResult};
-use response_json::{Custody, Selected, Unwatched};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 pub mod door;
 mod migrate;
-mod response_json;
 
 /// The plugin's name: the Statement's and the manifest's. (The `module` alias a reference spells is
 /// [`WORD`].)
@@ -96,7 +95,7 @@ pub struct VaultConfig {
     /// The Vault server address, e.g. `https://vault.internal:8200`. A trailing slash is tolerated.
     pub addr: String,
     /// The token's secret reference, as the operator wrote it (required).
-    pub token: serde_json::Value,
+    pub token: SettingsValue,
     /// An ADDITIONAL trusted root CA certificate (PEM), layered on top of the public root store.
     /// Never disables certificate validation, only widens the trusted-root set. Carried to the
     /// host as the need's `trust_from`.
@@ -109,7 +108,6 @@ pub struct VaultConfig {
 impl Drop for VaultConfig {
     fn drop(&mut self) {
         self.addr.zeroize();
-        wipe(&mut self.token);
         self.ca_cert_pem.zeroize();
     }
 }
@@ -128,22 +126,13 @@ impl std::fmt::Debug for VaultConfig {
 /// Parse the open-time settings bytes: an empty (or whitespace-only) config and a malformed one
 /// are refused, naming the plugin, with the guarded parser's current diagnostic. Then
 /// each value is judged, so `validate`, `open` and `refresh` refuse what could never serve, naming
-/// the key (the texts this crate words never quote a value; a JSON type error can quote the
-/// offending, non-secret value): an `addr` that is not an `http://` or `https://` URL naming a host
+/// the key (the texts this crate words never quote a value; parser errors expose only their class and position): an `addr` that is not an `http://` or `https://` URL naming a host
 /// (or that carries a query or fragment, which the request URL cannot carry), a `ca_cert_pem`
 /// holding no well-formed PEM certificate, and a `timeout_secs` of 0.
 ///
 /// # Errors
 /// The operator-facing refusal text.
 pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
-    parse_config_with(settings, Unwatched)
-}
-
-/// [`parse_config`], reporting each buffer the parse fills to `custody`.
-pub(crate) fn parse_config_with<C: Custody>(
-    settings: &[u8],
-    custody: C,
-) -> Result<VaultConfig, String> {
     let text = std::str::from_utf8(settings)
         .map_err(|e| format!("invalid hashicorp-vault plugin config: {e}"))?;
     if text.trim().is_empty() {
@@ -151,9 +140,37 @@ pub(crate) fn parse_config_with<C: Custody>(
             "hashicorp-vault plugin requires config (addr, token); none provided".to_string(),
         );
     }
-    let mut tree = response_json::parse_config(settings, custody)
+    let mut tree = cred::settings_document(settings)
         .map_err(|e| format!("invalid hashicorp-vault plugin config: {e}"))?;
-    if !addr_is_a_server_url(tree.text("addr").unwrap_or_default()) {
+    let invalid = |why: &str| format!("invalid hashicorp-vault plugin config: {why}");
+    let object = tree
+        .as_object()
+        .ok_or_else(|| invalid("expected struct VaultConfig"))?;
+    const FIELDS: &[&str] = &["addr", "token", "ca_cert_pem", "timeout_secs"];
+    if object.keys().any(|key| !FIELDS.contains(&key.as_str())) {
+        return Err(invalid("unknown configuration field"));
+    }
+    for name in ["addr", "token"] {
+        if !object.contains_key(name) {
+            return Err(invalid(&format!("missing field `{name}`")));
+        }
+    }
+    if !tree["addr"].is_string() {
+        return Err(invalid("`addr` must be a string"));
+    }
+    if tree
+        .get("ca_cert_pem")
+        .is_some_and(|v| !v.is_null() && !v.is_string())
+    {
+        return Err(invalid("`ca_cert_pem` must be a string or null"));
+    }
+    if tree
+        .get("timeout_secs")
+        .is_some_and(|v| v.as_u64().is_none())
+    {
+        return Err(invalid("`timeout_secs` must be a u64"));
+    }
+    if !addr_is_a_server_url(tree["addr"].as_str().unwrap_or_default()) {
         return Err(
             "invalid hashicorp-vault plugin config: `addr` must be an http:// or \
                     https:// URL naming the Vault server (e.g. https://vault.internal:8200), with \
@@ -161,11 +178,10 @@ pub(crate) fn parse_config_with<C: Custody>(
                 .to_string(),
         );
     }
-    if let Some(pem) = tree.text("ca_cert_pem") {
+    if let Some(pem) = tree.get("ca_cert_pem").and_then(serde_json::Value::as_str) {
         check_ca_cert_pem(pem)?;
     }
     let timeout_secs = tree
-        .0
         .get("timeout_secs")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or_else(default_timeout_secs);
@@ -175,9 +191,14 @@ pub(crate) fn parse_config_with<C: Custody>(
         );
     }
     Ok(VaultConfig {
-        addr: tree.take_text("addr").unwrap_or_default(),
-        token: tree.take(TOKEN_KEY).unwrap_or_default(),
-        ca_cert_pem: tree.take_text("ca_cert_pem"),
+        addr: tree
+            .take("addr")
+            .and_then(SettingsValue::into_string)
+            .unwrap_or_default(),
+        token: tree.take(TOKEN_KEY).expect("validated required token"),
+        ca_cert_pem: tree
+            .take("ca_cert_pem")
+            .and_then(SettingsValue::into_string),
         timeout_secs,
     })
 }
@@ -357,9 +378,8 @@ pub fn parse_reference(
 }
 
 /// ONE framed http request, as the plugin hands it to the host's exchange. The token rides as a
-/// head field; `Debug` never prints field values. The fields are clones of the client's token
-/// (`Arc`), so the token is wiped when the client (and every request still holding it) drops, not
-/// when one request does.
+/// sealed head field; `Debug` never prints field values. Requests clone the opaque credential,
+/// which wipes when its last client or request owner drops.
 pub struct Request {
     /// The method (`GET`).
     pub method: &'static str,
@@ -371,7 +391,7 @@ pub struct Request {
     /// Carries no secret.
     pub target: String,
     /// The head fields: `X-Vault-Token`.
-    pub fields: Vec<(&'static str, Arc<Zeroizing<Vec<u8>>>)>,
+    pub fields: Vec<(&'static str, Cred)>,
     /// The connect + total timeout, in milliseconds.
     pub timeout_ms: u64,
     /// The extra trusted root (PEM) the need's `trust_from` names; `None` = the public roots.
@@ -400,12 +420,12 @@ impl std::fmt::Debug for Request {
 
 /// ONE framed http response, as the exchange answers it. Dropping it zeroizes the body, and `Debug`
 /// never prints it (it may hold the material).
-#[derive(Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct Response {
     /// The status code.
     pub status: u16,
     /// The body, at most the request's `body_cap` bytes.
-    pub body: Vec<u8>,
+    pub body: Held<Vec<u8>>,
     /// The body's length, or a lower bound above `body_cap` when its streaming read stopped at
     /// that cap; over `body_cap` = too big.
     pub body_len: usize,
@@ -418,12 +438,6 @@ impl std::fmt::Debug for Response {
             .field("body", &format_args!("<{} bytes>", self.body.len()))
             .field("body_len", &self.body_len)
             .finish()
-    }
-}
-
-impl Drop for Response {
-    fn drop(&mut self) {
-        self.body.zeroize();
     }
 }
 
@@ -450,7 +464,7 @@ pub trait Exchange {
 /// once at `open` (and at `refresh`) and reused for every `resolve`.
 pub struct VaultClient {
     addr: String,
-    token: Arc<Zeroizing<Vec<u8>>>,
+    token: Cred,
     timeout_secs: u64,
     ca_cert_pem: Option<Arc<Zeroizing<String>>>,
 }
@@ -471,7 +485,7 @@ impl VaultClient {
     pub fn new(cfg: &VaultConfig, token: &[u8]) -> Self {
         Self {
             addr: base_addr(&cfg.addr),
-            token: Arc::new(Zeroizing::new(token.to_vec())),
+            token: Cred::captured(Zeroizing::new(token.to_vec())),
             timeout_secs: cfg.timeout_secs,
             ca_cert_pem: cfg
                 .ca_cert_pem
@@ -513,7 +527,7 @@ impl VaultClient {
             method: "GET",
             url,
             target,
-            fields: vec![("X-Vault-Token", Arc::clone(&self.token))],
+            fields: vec![("X-Vault-Token", self.token.clone())],
             timeout_ms: self.timeout_secs.saturating_mul(1000),
             trust_pem: self.ca_cert_pem.clone(),
             body_cap: MAX_VAULT_RESPONSE_BYTES + 1,
@@ -525,17 +539,7 @@ impl VaultClient {
         &self,
         settings: &serde_json::Map<String, serde_json::Value>,
         exchange: &dyn Exchange,
-    ) -> Option<SecretResult<Vec<u8>>> {
-        self.resolve_with(settings, exchange, Unwatched)
-    }
-
-    /// [`VaultClient::resolve`], reporting each buffer the reply's parse fills to `custody`.
-    pub(crate) fn resolve_with<C: Custody>(
-        &self,
-        settings: &serde_json::Map<String, serde_json::Value>,
-        exchange: &dyn Exchange,
-        custody: C,
-    ) -> Option<SecretResult<Vec<u8>>> {
+    ) -> Option<SecretResult<Held<Vec<u8>>>> {
         let (path, field) = match parse_reference(settings) {
             Ok(r) => r,
             Err(e) => return Some(Err(e)),
@@ -546,9 +550,7 @@ impl VaultClient {
         };
         match exchange.exchange(&request) {
             Exchanged::Pending => None,
-            Exchanged::Done(result) => {
-                Some(judge_with(&path, &field, &request.url, result, custody))
-            }
+            Exchanged::Done(result) => Some(judge(&path, &field, &request.url, result)),
         }
     }
 }
@@ -690,7 +692,7 @@ fn status_text(status: u16) -> String {
 ///
 /// The reply is read without handing `serde_json` a string's bytes and without building a tree:
 /// only `data.data.<field>` is decoded, into a guarded buffer, and every other value is validated
-/// in place. A selected string moves out as the material; a non-string value is written as its
+/// in place. A selected string stays in SDK custody as the material; a non-string value is written as its
 /// JSON text (what 1.5.5's `serde_json::Value` printed) into an exactly sized buffer. The body
 /// and every decoded key and value are wiped on release.
 ///
@@ -701,19 +703,8 @@ pub fn judge(
     field: &str,
     url: &str,
     result: Result<Response, ConnFailure>,
-) -> SecretResult<Vec<u8>> {
-    judge_with(vault_path, field, url, result, Unwatched)
-}
-
-/// [`judge`], reporting each buffer the reply's parse fills to `custody`.
-pub(crate) fn judge_with<C: Custody>(
-    vault_path: &str,
-    field: &str,
-    url: &str,
-    result: Result<Response, ConnFailure>,
-    custody: C,
-) -> SecretResult<Vec<u8>> {
-    let mut resp = result.map_err(|failure| {
+) -> SecretResult<Held<Vec<u8>>> {
+    let resp = result.map_err(|failure| {
         let cause = failure.to_string();
         let cause = cause.trim();
         let tail = if cause.is_empty() {
@@ -763,7 +754,7 @@ pub(crate) fn judge_with<C: Custody>(
             "Vault response body exceeds the {cap}-byte cap (path {vault_path:?}, {url})"
         )));
     }
-    let body = Zeroizing::new(std::mem::take(&mut resp.body));
+    let body = resp.body;
 
     if (300..400).contains(&status) {
         return Err(SecretModuleError::internal(format!(
@@ -779,105 +770,30 @@ pub(crate) fn judge_with<C: Custody>(
         )));
     }
 
-    let selected = response_json::select(&body, field, custody).map_err(|e| {
+    let selected = cred::select_json(body, &["data", "data", field]).map_err(|e| {
         SecretModuleError::internal(format!(
             "Vault response for path {vault_path:?} is not valid JSON: {e}"
         ))
     })?;
     match selected {
-        Selected::NoData => Err(SecretModuleError::invalid(format!(
-            "Vault response for path {vault_path:?} has no `data.data` object (not a KV v2 \
+        SelectedJson::WrongContainer { .. } | SelectedJson::Missing { segment: 0 | 1 } => {
+            Err(SecretModuleError::invalid(format!(
+                "Vault response for path {vault_path:?} has no `data.data` object (not a KV v2 \
              read? check the path includes the `data/` segment, e.g. \"mount/data/name\")"
-        ))),
-        Selected::NoField => Err(SecretModuleError::not_found(format!(
+            )))
+        }
+        SelectedJson::Missing { .. } => Err(SecretModuleError::not_found(format!(
             "Vault secret at path {vault_path:?} has no field {field:?}"
         ))),
-        Selected::Text(text) if text.is_empty() => Err(SecretModuleError::invalid(format!(
+        SelectedJson::Value(text) if text.is_empty() => Err(SecretModuleError::invalid(format!(
             "Vault secret at path {vault_path:?} field {field:?} is EMPTY; a secret must be \
              non-empty (fail-closed)"
         ))),
-        Selected::Text(mut text) => Ok(std::mem::take(&mut *text).into_bytes()),
-        Selected::Null => Err(SecretModuleError::invalid(format!(
+        SelectedJson::Value(text) => Ok(text),
+        SelectedJson::Null => Err(SecretModuleError::invalid(format!(
             "Vault secret at path {vault_path:?} field {field:?} is null; a secret must be \
              non-empty (fail-closed)"
         ))),
-        Selected::Rendered(mut text) => Ok(std::mem::take(&mut *text)),
-    }
-}
-
-/// A parsed JSON value whose strings (keys included), numbers and booleans are wiped when it is
-/// dropped, on every return path.
-struct Wiped(serde_json::Value);
-
-impl Wiped {
-    /// An empty object.
-    fn object() -> Self {
-        Self(serde_json::Value::Object(serde_json::Map::new()))
-    }
-
-    /// Whether this object holds `key`.
-    fn has(&self, key: &str) -> bool {
-        self.0.get(key).is_some()
-    }
-
-    /// The string at `key`, if it is one.
-    fn text(&self, key: &str) -> Option<&str> {
-        self.0.get(key).and_then(serde_json::Value::as_str)
-    }
-
-    /// Set `key` in this object to `value`, the last of equal keys winning. Each is taken only when
-    /// it is stored; a replaced value is swapped into `value`, so its holder wipes it.
-    fn put(&mut self, key: &mut String, value: &mut serde_json::Value) {
-        if let serde_json::Value::Object(items) = &mut self.0 {
-            if let Some(previous) = items.get_mut(key.as_str()) {
-                std::mem::swap(previous, value);
-            } else {
-                items.insert(std::mem::take(key), std::mem::take(value));
-            }
-        }
-    }
-
-    /// Append `value` (taken) to this array.
-    fn push(&mut self, value: &mut serde_json::Value) {
-        if let serde_json::Value::Array(items) = &mut self.0 {
-            items.push(std::mem::take(value));
-        }
-    }
-
-    /// The value at `key`, moved out (its key stays, to be wiped with the rest).
-    fn take(&mut self, key: &str) -> Option<serde_json::Value> {
-        self.0.get_mut(key).map(std::mem::take)
-    }
-
-    /// The string at `key`, moved out, if it is one.
-    fn take_text(&mut self, key: &str) -> Option<String> {
-        match self.0.get_mut(key) {
-            Some(serde_json::Value::String(text)) => Some(std::mem::take(text)),
-            _ => None,
-        }
-    }
-}
-
-impl Drop for Wiped {
-    fn drop(&mut self) {
-        wipe(&mut self.0);
-    }
-}
-
-/// Zeroize every string under `v`, including object keys and nested array/object values.
-fn wipe(v: &mut serde_json::Value) {
-    match v {
-        serde_json::Value::String(s) => s.zeroize(),
-        serde_json::Value::Number(_) => *v = serde_json::Value::from(0u64),
-        serde_json::Value::Bool(b) => *b = false,
-        serde_json::Value::Array(items) => items.iter_mut().for_each(wipe),
-        serde_json::Value::Object(map) => {
-            for (mut key, mut value) in std::mem::take(map) {
-                key.zeroize();
-                wipe(&mut value);
-            }
-        }
-        serde_json::Value::Null => {}
     }
 }
 
@@ -892,3 +808,7 @@ mod wiping_tests;
 #[cfg(test)]
 #[path = "tests/audit_tests.rs"]
 mod audit_tests;
+
+#[cfg(test)]
+#[path = "tests/custody_support.rs"]
+mod custody_support;

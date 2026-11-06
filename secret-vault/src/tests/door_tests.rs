@@ -27,7 +27,7 @@ impl Exchange for Scripted {
         }
         Exchanged::Done(Ok(crate::Response {
             status: self.status,
-            body: self.body.clone().into_bytes(),
+            body: busbar_contract::abi::sdk::cred::Held::new(self.body.clone().into_bytes()),
             body_len: self.body.len(),
         }))
     }
@@ -44,7 +44,9 @@ struct Rig<E> {
 
 impl<E: Exchange> Rig<E> {
     fn resolve(&self, settings: &[u8]) -> Option<SecretResult<Vec<u8>>> {
-        self.vault.resolve(&self.exchange, settings)
+        self.vault
+            .resolve(&self.exchange, settings)
+            .map(|r| r.map(crate::custody_support::material))
     }
 }
 
@@ -82,11 +84,11 @@ fn a_read_answers_the_material() {
 #[test]
 fn a_refusal_answers_its_kind() {
     let v = vault(403, "denied", 0);
-    let e = v.resolve(&reference()).unwrap().unwrap_err();
+    let e = v.resolve(&reference()).unwrap().err().unwrap();
     assert_eq!(error_kind(e.kind), ERROR_KIND_DENIED);
     assert!(!e.message.is_empty(), "a refusal names its reason");
 
-    let e = v.resolve(b"[not an object]").unwrap().unwrap_err();
+    let e = v.resolve(b"[not an object]").unwrap().err().unwrap();
     assert_eq!(e.kind, SecretErrorKind::Invalid);
     assert_eq!(error_kind(e.kind), ERROR_KIND_INVALID);
 }
@@ -145,12 +147,12 @@ impl Exchange for Recording {
             .fields
             .iter()
             .find(|(n, _)| *n == "X-Vault-Token")
-            .map(|(_, v)| v.to_vec())
+            .map(|(_, v)| crate::custody_support::token(v))
             .unwrap_or_default();
         self.tokens.lock().unwrap().push(token);
         Exchanged::Done(Ok(crate::Response {
             status: 200,
-            body: OK_BODY.as_bytes().to_vec(),
+            body: busbar_contract::abi::sdk::cred::Held::new(OK_BODY.as_bytes().to_vec()),
             body_len: OK_BODY.len(),
         }))
     }
@@ -249,16 +251,16 @@ fn a_token_with_a_control_character_is_refused_at_open_and_refresh() {
 #[test]
 fn the_reply_is_cut_at_the_body_cap() {
     let cap = crate::MAX_VAULT_RESPONSE_BYTES;
-    for (len, kept) in [(cap, cap), (cap + 1, cap), (3, 3), (0, 0)] {
-        let r = cut_to_cap(
-            sdk::ExchangeResponse {
-                status: 200,
-                body: vec![b'x'; len],
-                ..Default::default()
-            },
-            cap,
-        );
-        assert_eq!((r.status, r.body.len(), r.body_len), (200, kept, len));
+    for len in [cap, cap + 1, 3, 0] {
+        let reply = sdk::ProtectedResponse::from(sdk::ExchangeResponse {
+            status: 200,
+            body: vec![b'x'; len],
+            ..Default::default()
+        });
+        let Exchanged::Done(Ok(r)) = bounded_reply(Ok(reply), cap) else {
+            panic!("reply")
+        };
+        assert_eq!((r.status, r.body.len(), r.body_len), (200, len, len));
     }
 
     let c = VaultClient::new(&crate::parse_config(SETTINGS).unwrap(), b"tok");
@@ -279,16 +281,24 @@ fn the_framed_exchange_picks_the_need_and_builds_the_request() {
     let trust = &NEEDS[need as usize].trust_from;
     assert_eq!(trust.len, "settings.ca_cert_pem".len());
     assert!(!trust.ptr.is_null());
-    let built = build().expect("builds");
+    let (built, sealed) = build().expect("builds");
     assert_eq!(built.method, b"GET");
     assert_eq!(built.target, with_ca.target.clone().into_bytes());
-    assert_eq!(
-        built.fields,
-        vec![(b"X-Vault-Token".to_vec(), b"tok".to_vec())]
+    assert!(
+        built.fields.is_empty(),
+        "the token is absent from ordinary request fields"
     );
+    assert_eq!(sealed.len(), 1);
+    assert_eq!(sealed[0].1, b"X-Vault-Token");
     assert_eq!(built.timeout_ms, with_ca.timeout_ms);
     assert!(built.body.is_empty());
 
+    let exchange = sdk::Exchange::request_sealed(built, sealed).unwrap();
+    let wire = busbar_contract::abi::sdk::test_support::chip::framed_head(&exchange);
+    assert!(
+        wire.windows(3).any(|part| part == b"tok"),
+        "sealed token reaches actual framed wire"
+    );
     let (need, _) = framed(&plain);
     assert!(NEEDS[need as usize].trust_from.ptr.is_null());
 }

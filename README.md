@@ -85,10 +85,9 @@ AppRole/Kubernetes login flows are a natural future extension of
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
 stray key fails loudly at boot instead of being silently ignored. `validate`,
-`open` and `refresh` refuse the same settings, naming the key; the
-refusals this plugin words itself never quote a value, but a JSON type
-error from the parser (e.g. a `timeout_secs` of the wrong type) can quote
-the offending, non-secret value.
+`open` and `refresh` refuse the same settings, naming the key; all
+refusals omit configuration values. Parser errors expose only their class and position;
+schema errors identify the expected setting or type.
 
 ### Per-reference settings (`{ module: vault, settings: {...} }`)
 
@@ -117,7 +116,7 @@ the fields a secret holds), the token or the material.
 
 ## Differences from 1.5.5
 
-Vault replies are parsed without allocating trees for unrelated fields. This bounds memory amplification from hostile replies while preserving selected values, including JSON rendering of non-string fields. Owned parsing buffers are wiped before release. Error messages report the current guarded parser and host connector; historical serde error columns and reqwest error wording are not reproduced.
+Vault replies are parsed without allocating trees for unrelated fields. This bounds memory amplification from hostile replies while preserving selected values, including JSON rendering of non-string fields. The shared credential SDK holds the token as `Cred`, sends it through sealed request fields, and keeps response bodies and selected values as opaque `Held` material through the final host write. The same guarded JSON engine reads credential settings. Owned string and rendering buffers wipe on release and growth. Official serde_json still owns numeric-token scratch; this change does not claim that upstream parser scratch is globally wiped. Response parse errors expose only a class and position, never response values or sibling field names.
 
 For a pre-1.6 configuration with an inline `token`, the plugin's migration entry asks the host to extract the exact credential bytes to a private file and replace the value with a file secret reference. Structured references remain unchanged. The migration report never prints the token, and runtime token handling remains reference-only.
 
