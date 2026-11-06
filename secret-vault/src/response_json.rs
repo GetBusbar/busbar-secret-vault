@@ -12,6 +12,10 @@
 //! `serde_json` prints for the parsed value (object keys sorted, the last of equal keys winning).
 //!
 //! Refusals report the guarded parser's current error and position without replaying the document.
+//!
+//! `serde_json` runs with `arbitrary_precision` (busbar-contract enables it), so a number that is not
+//! a whole `i64`/`u64` token arrives as its private number map (see [`NumberText`]), never through
+//! `visit_f64`: no reader here implements it.
 
 use std::ops::Range;
 
@@ -84,7 +88,7 @@ pub(crate) fn select<C: Custody>(body: &[u8], field: &str, custody: C) -> Result
 }
 
 /// The open-time settings `body` as a tree, checked against `VaultConfig`
-/// (`deny_unknown_fields`; `addr` a string and `token` present; `ca_cert_pem` a string or null and
+/// (a key outside [`CONFIG_FIELDS`] refused; `addr` a string and `token` present; `ca_cert_pem` a string or null and
 /// `timeout_secs` a `u64` when given; each key at most once), with `serde_json`'s texts. Config
 /// strings have the same custody as a reply's.
 pub(crate) fn parse_config<C: Custody>(body: &[u8], custody: C) -> Result<Wiped, String> {
@@ -198,10 +202,6 @@ impl<'de, C: Custody> Visitor<'de> for Walk<'_, C> {
         Ok(Selected::NoData)
     }
 
-    fn visit_f64<E: Error>(self, _: f64) -> Result<Selected, E> {
-        Ok(Selected::NoData)
-    }
-
     fn visit_borrowed_str<E: Error>(self, value: &'de str) -> Result<Selected, E> {
         self.doc.validated::<E>(value)?;
         Ok(Selected::NoData)
@@ -281,10 +281,6 @@ impl<'de, C: Custody> Visitor<'de> for Pick<'_, C> {
     }
 
     fn visit_u64<E: Error>(self, value: u64) -> Result<Selected, E> {
-        self.written(&value)
-    }
-
-    fn visit_f64<E: Error>(self, value: f64) -> Result<Selected, E> {
         self.written(&value)
     }
 
@@ -371,10 +367,6 @@ impl<'de, C: Custody> Visitor<'de> for Render<'_, '_, C> {
     }
 
     fn visit_u64<E: Error>(self, value: u64) -> Result<(), E> {
-        self.scalar(&value)
-    }
-
-    fn visit_f64<E: Error>(self, value: f64) -> Result<(), E> {
         self.scalar(&value)
     }
 
@@ -542,10 +534,6 @@ impl<'de, C: Custody> Visitor<'de> for Skip<'_, C> {
         Ok(())
     }
 
-    fn visit_f64<E: Error>(self, _: f64) -> Result<(), E> {
-        Ok(())
-    }
-
     fn visit_borrowed_str<E: Error>(self, value: &'de str) -> Result<(), E> {
         if self.0.raw::<E>(value).is_err() && value == "$serde_json::private::Number" {
             // A synthetic number key, not bytes from a JSON string in the document.
@@ -643,32 +631,6 @@ impl<'de> Visitor<'de> for NumberText {
     }
 }
 
-/// An object key, decoded.
-struct Key<'a, C>(Doc<'a, C>);
-
-impl<'de, C: Custody> DeserializeSeed<'de> for Key<'_, C> {
-    type Value = Zeroizing<String>;
-
-    fn deserialize<D: serde::Deserializer<'de>>(
-        self,
-        de: D,
-    ) -> Result<Zeroizing<String>, D::Error> {
-        de.deserialize_str(self)
-    }
-}
-
-impl<'de, C: Custody> Visitor<'de> for Key<'_, C> {
-    type Value = Zeroizing<String>;
-
-    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a string")
-    }
-
-    fn visit_borrowed_str<E: Error>(self, value: &'de str) -> Result<Zeroizing<String>, E> {
-        self.0.decoded(value, Held::Key)
-    }
-}
-
 /// The open-time settings object.
 struct Config<'a, C>(Doc<'a, C>);
 
@@ -694,7 +656,10 @@ impl<'de, C: Custody> Visitor<'de> for Config<'_, C> {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Wiped, A::Error> {
         let mut tree = Wiped::object();
-        while let Some(mut key) = map.next_key_seed(Key(self.0))? {
+        while let Some(key) = map.next_key_seed(AnyKey(self.0))? {
+            let ObjectKey::Text(mut key) = key else {
+                return Err(not_a_whole_number(map.next_value_seed(NumberText)?, &self));
+            };
             let Some(&name) = CONFIG_FIELDS.iter().find(|name| **name == key.as_str()) else {
                 return Err(A::Error::unknown_field(key.as_str(), CONFIG_FIELDS));
             };
@@ -791,17 +756,37 @@ impl<'de, C: Custody> Visitor<'de> for Seconds<'_, C> {
         Ok(Wiped(Value::from(value)))
     }
 
+    /// serde_json answers a non-negative integer token with `visit_u64`, so this is a negative one.
     fn visit_i64<E: Error>(self, value: i64) -> Result<Wiped, E> {
-        match u64::try_from(value) {
-            Ok(value) => Ok(Wiped(Value::from(value))),
-            Err(_) => Err(E::invalid_value(Unexpected::Signed(value), &self)),
-        }
+        Err(E::invalid_value(Unexpected::Signed(value), &self))
     }
 
     fn visit_borrowed_str<E: Error>(self, value: &'de str) -> Result<Wiped, E> {
         let text = self.0.decoded::<E>(value, Held::Value)?;
         Err(E::invalid_type(Unexpected::Str(text.as_str()), &self))
     }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Wiped, A::Error> {
+        match map.next_key_seed(AnyKey(self.0))? {
+            Some(ObjectKey::Number) => {
+                Err(not_a_whole_number(map.next_value_seed(NumberText)?, &self))
+            }
+            _ => Err(A::Error::invalid_type(Unexpected::Map, &self)),
+        }
+    }
+}
+
+/// The refusal of a number that is not a whole `u64`/`i64` token (a fraction, an exponent, or an
+/// integer out of range), which `arbitrary_precision` delivers as serde_json's private number map:
+/// named as the floating-point value serde_json would otherwise have parsed it as.
+fn not_a_whole_number<E: Error>(
+    number: serde_json::Number,
+    expected: &dyn serde::de::Expected,
+) -> E {
+    E::invalid_type(
+        Unexpected::Float(number.as_f64().unwrap_or(f64::NAN)),
+        expected,
+    )
 }
 
 /// Any value, kept whole (the token's reference).
@@ -835,10 +820,6 @@ impl<'de, C: Custody> Visitor<'de> for Tree<'_, C> {
     }
 
     fn visit_u64<E: Error>(self, value: u64) -> Result<Wiped, E> {
-        Ok(Wiped(Value::from(value)))
-    }
-
-    fn visit_f64<E: Error>(self, value: f64) -> Result<Wiped, E> {
         Ok(Wiped(Value::from(value)))
     }
 

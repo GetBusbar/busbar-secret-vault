@@ -487,7 +487,7 @@ impl VaultClient {
     }
 
     /// The one request a read of `vault_path` sends. Its `target` is the path and query of
-    /// `{addr}/v1/{path}` as the `url` crate parses it (see [`wire_url`]); the fragment a `#`
+    /// `{addr}/v1/{path}` as the `url` crate parses it (see `wire_url`); the fragment a `#`
     /// starts is not sent. It is never a fallback.
     ///
     /// # Errors
@@ -633,8 +633,8 @@ fn wire_url(url: &str) -> String {
 /// request URL from `{addr}/v1/{path}`: `\` is `/`, a `.` segment (or `%2e`, any case) is dropped,
 /// a `..` segment (`.%2e`, `%2e.`, `%2e%2e`) removes the segment before it and never climbs above
 /// the root, and a trailing `.`/`..` leaves a trailing `/`. The `addr` prefix and `/v1` are
-/// segments like any other, so a leading `..` in the operator's path pops them. The query is left
-/// alone.
+/// segments like any other, so a leading `..` in the operator's path pops them. `url` carries no
+/// query: [`wire_url`] splits it off at the first `?` before this runs.
 fn normalise_url_path(url: &str) -> String {
     let path_start = url
         .find("://")
@@ -642,11 +642,7 @@ fn normalise_url_path(url: &str) -> String {
     let Some(start) = path_start else {
         return url.to_string();
     };
-    let (origin, rest) = url.split_at(start);
-    let (path, query) = match rest.find('?') {
-        Some(q) => rest.split_at(q),
-        None => (rest, ""),
-    };
+    let (origin, path) = url.split_at(start);
     let path = path.replace('\\', "/");
     let is_dots = |seg: &str, n: usize| {
         let lower = seg.to_ascii_lowercase();
@@ -670,7 +666,7 @@ fn normalise_url_path(url: &str) -> String {
             segments.push(seg);
         }
     }
-    format!("{origin}/{}{query}", segments.join("/"))
+    format!("{origin}/{}", segments.join("/"))
 }
 
 /// `http`'s status rendering (`"404 Not Found"`).

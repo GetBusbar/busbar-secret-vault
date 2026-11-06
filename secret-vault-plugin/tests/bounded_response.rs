@@ -38,8 +38,8 @@ fn json(bytes: &[u8]) -> Blob {
     }
 }
 
-#[derive(Default)]
-struct AuditSink(Mutex<Vec<Vec<u8>>>);
+/// Refuses any credential that crosses a metric label or a diagnostic.
+struct AuditSink;
 fn clean(bytes: &[u8]) {
     for credential in [
         TOKEN.as_bytes(),
@@ -59,13 +59,11 @@ impl busbar_plugin_loader::dispatch::EnvelopeSink for AuditSink {
     fn metric(&self, metric: busbar_plugin_loader::dispatch::Metric<'_>) {
         for label in metric.labels {
             clean(label);
-            self.0.lock().unwrap().push(label.to_vec());
         }
     }
     fn diag(&self, diagnostic: busbar_plugin_loader::dispatch::Diagnostic<'_>) {
         clean(diagnostic.name);
         clean(diagnostic.text);
-        self.0.lock().unwrap().push(diagnostic.text.to_vec());
     }
     fn dropped(&self, _: busbar_plugin_loader::dispatch::Dropped) {}
 }
@@ -121,7 +119,7 @@ fn plugin_with_trust(
     let bind = Bind {
         instance: Arc::from(instance),
         max_inflight_cap: 1024,
-        sink: Arc::new(AuditSink::default()),
+        sink: Arc::new(AuditSink),
         dispatcher: d.adopter(),
         conns: ConnTable::Host(host(d.conn_waker(), anchors, false)),
     };
@@ -1296,6 +1294,8 @@ fn ordinary_lifecycle_resolution_and_refused_refresh_preserve_the_vault_contract
                     }
                     Err(error) => panic!("Vault endpoint accept: {error}"),
                 };
+                // An accepted stream inherits the listener's non-blocking mode on BSD/macOS.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(10)))
                     .unwrap();

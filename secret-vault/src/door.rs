@@ -52,9 +52,9 @@ const TARGET_FROM: &str = "settings.addr";
 const TRUST_FROM: &str = "settings.ca_cert_pem";
 
 /// The need over the public roots: a Vault reached with the host's default trust.
-pub const NEED_PUBLIC: u32 = 0;
+const NEED_PUBLIC: u32 = 0;
 /// The need over the operator's CA (`ca_cert_pem`): the same target, its TLS trusting that CA too.
-pub const NEED_OPERATOR_CA: u32 = 1;
+const NEED_OPERATOR_CA: u32 = 1;
 
 /// One outbound need framed by the `http` transport to the `addr` setting's target, in the
 /// operator-infrastructure egress class (a Vault is the operator's own service: its address may be
@@ -80,7 +80,7 @@ const fn need(trust_from: AbiStr) -> Need {
     }
 }
 
-/// The two needs, by index: [`NEED_PUBLIC`] and [`NEED_OPERATOR_CA`]. A configuration with no
+/// The two needs, by index: `NEED_PUBLIC` and `NEED_OPERATOR_CA`. A configuration with no
 /// `ca_cert_pem` leaves the second undeclared (its trust resolved to nothing), and every read goes
 /// over the first.
 const NEEDS: &[Need] = &[need(NONE), need(abi_str(TRUST_FROM))];
@@ -142,8 +142,8 @@ fn client(settings: &[u8], secrets: &[&[u8]]) -> Result<VaultClient, Refusal> {
 }
 
 /// THE HOST'S FRAMED ONE-SHOT HTTP EXCHANGE over this plugin's declared need, for the op on its
-/// ticket (the SDK's [`Op`]): the request goes over [`NEED_OPERATOR_CA`] when it names an operator
-/// CA, else over [`NEED_PUBLIC`], to the need's target (`addr`), at the request's path; PENDING
+/// ticket (the SDK's [`Op`]): the request goes over `NEED_OPERATOR_CA` when it names an operator
+/// CA, else over `NEED_PUBLIC`, to the need's target (`addr`), at the request's path; PENDING
 /// while it runs (the op is re-entered on its wake and the parked exchange resumed).
 pub struct HostExchange<'a> {
     op: Op<'a>,
@@ -173,8 +173,8 @@ impl<'a> HostExchange<'a> {
     }
 }
 
-/// The need a request goes over: [`NEED_OPERATOR_CA`] when it names an operator CA, else
-/// [`NEED_PUBLIC`].
+/// The need a request goes over: `NEED_OPERATOR_CA` when it names an operator CA, else
+/// `NEED_PUBLIC`.
 fn need_for(request: &Request) -> u32 {
     if request.trust_pem.is_some() {
         NEED_OPERATOR_CA

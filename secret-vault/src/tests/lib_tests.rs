@@ -112,7 +112,7 @@ fn roundtrip_against_live_vault() {
         _ if std::env::var_os("CI").is_some() => {
             panic!(
                 "BUSBAR_TEST_VAULT_ADDR / BUSBAR_TEST_VAULT_TOKEN are unset under CI: a Vault \
-                 dev-mode service container must provision them (see .github/workflows/ci.yml). \
+                 dev-mode service the CI runner provisions must supply them. \
                  Refusing to silently skip the only live-Vault coverage in CI."
             );
         }
@@ -1388,5 +1388,123 @@ fn selected_string_null_and_nested_nulls_remain_valid_material() {
         let ex = Canned::status(200, &kv2(json!({"k":selected})));
         let got = run(&ex, json!({"path":"kv/data/openai#k"})).unwrap();
         assert_eq!(got, expected);
+    }
+}
+
+/// A non-integer `timeout_secs` is refused as the number it is. Under `arbitrary_precision` (on in
+/// the production graph) serde_json hands such a number to the visitor as its private number map,
+/// which must not surface as "invalid type: map".
+#[test]
+fn a_non_integer_timeout_is_refused_as_a_number_not_a_map() {
+    for (timeout, shown) in [
+        ("1.5", "1.5"),
+        ("1e2", "100.0"),
+        ("18446744073709551616", "1.8446744073709552e+19"),
+    ] {
+        let settings =
+            format!(r#"{{"addr":"https://v","token":{{"env":"T"}},"timeout_secs":{timeout}}}"#);
+        let e = parse_config(settings.as_bytes()).unwrap_err();
+        assert!(
+            e.contains(&format!(
+                "invalid type: floating point `{shown}`, expected u64"
+            )),
+            "{timeout}: {e}"
+        );
+        assert!(!e.contains("map"), "{timeout}: {e}");
+    }
+    let e =
+        parse_config(br#"{"addr":"https://v","token":"t","timeout_secs":{"n":1}}"#).unwrap_err();
+    assert!(e.contains("invalid type: map, expected u64"), "{e}");
+}
+
+/// A top-level non-integer number is refused as a number of the wrong type, not as an internal
+/// string-span fault.
+#[test]
+fn a_top_level_number_config_is_refused_as_the_wrong_type() {
+    for config in ["1.5", "18446744073709551616"] {
+        let e = parse_config(config.as_bytes()).unwrap_err();
+        assert!(e.contains("invalid type: floating point"), "{config}: {e}");
+        assert!(e.contains("expected struct VaultConfig"), "{config}: {e}");
+        assert!(!e.contains("span"), "{config}: {e}");
+    }
+}
+
+/// A reply whose root, `data` or `data.data` is a scalar or an array is not a KV v2 read: each is
+/// refused INVALID naming the missing `data.data` object, never resolved.
+#[test]
+fn a_reply_whose_data_is_not_an_object_is_refused_as_not_kv2() {
+    for body in [
+        "true",
+        "-1",
+        "7",
+        r#"[1,"x",{"data":{"data":{"k":"v"}}}]"#,
+        r#"{"data":-1}"#,
+        r#"{"data":true}"#,
+        r#"{"data":3}"#,
+        r#"{"data":[{"data":{"k":"v"}}]}"#,
+        r#"{"data":{"data":["k","v"]}}"#,
+        r#"{"data":{"data":-2}}"#,
+    ] {
+        let e = run(
+            &Canned::status(200, body),
+            json!({ "path": "kv/data/openai#k" }),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, SecretErrorKind::Invalid, "{body}: {e}");
+        assert!(e.message.contains("no `data.data` object"), "{body}: {e}");
+    }
+}
+
+/// Negative integers are carried exactly: a negative field is its JSON text, a negative inside a
+/// selected object or array is written as serde_json writes it, and a negative sibling is skipped.
+#[test]
+fn negative_integers_are_rendered_exactly_and_skipped_siblings_do_not_interfere() {
+    for (data, expected) in [
+        (r#"{"k":-5}"#, b"-5".to_vec()),
+        (
+            r#"{"k":{"b":-5,"a":[-1,-9223372036854775808]}}"#,
+            br#"{"a":[-1,-9223372036854775808],"b":-5}"#.to_vec(),
+        ),
+        (r#"{"other":-3,"k":"v","more":[-4]}"#, b"v".to_vec()),
+    ] {
+        let body = format!(r#"{{"data":{{"data":{data}}}}}"#);
+        let got = run(
+            &Canned::status(200, &body),
+            json!({ "path": "kv/data/openai#k" }),
+        )
+        .unwrap();
+        assert_eq!(got, expected, "{data}");
+    }
+}
+
+/// The token reference is kept whole whatever JSON it is (the host judges its syntax), including
+/// numbers that serde_json carries as exact tokens.
+#[test]
+fn the_token_reference_is_kept_whole_for_every_json_number() {
+    for token in ["5", "-5", "1.5", "18446744073709551616"] {
+        let settings = format!(r#"{{"addr":"https://v","token":{token}}}"#);
+        let c = parse_config(settings.as_bytes()).unwrap();
+        assert_eq!(c.token.to_string(), token);
+    }
+    let c = parse_config(br#"{"addr":"https://v","token":{"env":"T","n":[-1,2]}}"#).unwrap();
+    assert_eq!(c.token, json!({"env":"T","n":[-1,2]}));
+}
+
+/// A status `http` cannot name (e.g. the 0 a host answers for an unparseable status line) is
+/// refused INTERNAL and printed as unknown, never classed as success.
+#[test]
+fn a_status_http_cannot_name_is_refused_internal_as_unknown() {
+    for status in [0u16, 1000] {
+        let e = run(
+            &Canned::status(status, &kv2(json!({"k":"v"}))),
+            json!({ "path": "kv/data/openai#k" }),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, SecretErrorKind::Internal, "{status}: {e}");
+        assert!(
+            e.message
+                .contains(&format!("HTTP {status} <unknown status code>")),
+            "{status}: {e}"
+        );
     }
 }
