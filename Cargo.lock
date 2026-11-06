@@ -480,12 +480,14 @@ dependencies = [
 name = "busbar-secret-vault"
 version = "1.6.0"
 dependencies = [
+ "base64 0.22.1",
  "busbar-contract 1.6.0 (git+https://github.com/GetBusbar/busbar?rev=fb67c5b3d45972141e7c6e3dc97821bb8aee54d6)",
  "http",
  "jsonschema",
  "reqwest",
  "serde",
  "serde_json",
+ "url",
  "zeroize",
 ]
 

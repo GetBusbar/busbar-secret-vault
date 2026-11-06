@@ -1146,21 +1146,7 @@ fn a_ca_cert_pem_that_does_not_decode_is_refused() {
         .collect();
     let mut der = decode_base64(&body).expect("the real certificate decodes");
     der.push(0);
-    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut enc = String::new();
-    for chunk in der.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |n, (i, &b)| n | (u32::from(b) << (16 - 8 * i)));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                enc.push(char::from(alphabet[((n >> (18 - 6 * i)) & 63) as usize]));
-            } else {
-                enc.push('=');
-            }
-        }
-    }
+    let enc = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &der);
     assert_eq!(
         config_with_ca(&block(&enc)).err().unwrap(),
         not_der,
@@ -1224,12 +1210,17 @@ fn the_framed_target_normalises_the_path_as_the_url_crate_did() {
 }
 
 #[test]
-fn encode_path_writes_every_byte_a_uri_cannot_hold() {
-    assert_eq!(encoded("\"{}", PATH_SET), "%22%7B%7D");
-    assert_eq!(encoded("a\u{7f}b", PATH_SET), "a%7Fb");
-    assert_eq!(encoded("a\u{1}b\tc", PATH_SET), "a%01b%09c");
-    assert_eq!(encoded("a b#c<d>e`f", PATH_SET), "a%20b%23c%3Cd%3Ee%60f");
-    assert_eq!(encoded("a/b?c=%20&d", PATH_SET), "a/b%3Fc=%20&d");
+fn request_targets_encode_controls_and_delimiters() {
+    let client = VaultClient::new(&cfg("https://v"), TOKEN);
+    for (path, target) in [
+        ("\"{}", "/v1/%22%7B%7D"),
+        ("a\u{7f}b", "/v1/a%7Fb"),
+        ("a\u{1}b\tc", "/v1/a%01bc"),
+        ("a b#c<d>e`f", "/v1/a%20b"),
+        ("a/b?c=%20&d", "/v1/a/b?c=%20&d"),
+    ] {
+        assert_eq!(client.request(path).unwrap().target, target, "{path:?}");
+    }
 }
 
 #[test]

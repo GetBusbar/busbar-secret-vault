@@ -58,7 +58,6 @@
 use busbar_contract::abi::sdk::conn::ConnFailure;
 use busbar_contract::abi::sdk::cred::{self, Cred, Held, SelectedJson, SettingsValue};
 use busbar_contract::secret::{SecretModuleError, SecretResult};
-use std::fmt::Write as _;
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -250,35 +249,12 @@ fn check_ca_cert_pem(pem: &str) -> Result<(), String> {
 /// Strict standard-alphabet base64 (whitespace ignored): padding only at the end and only as needed,
 /// no stray bytes, no non-zero trailing bits. `None` when it is not, or decodes to nothing.
 fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
     let symbols: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if symbols.is_empty() || !symbols.len().is_multiple_of(4) {
-        return None;
-    }
-    let pad = symbols.iter().rev().take_while(|&&b| b == b'=').count();
-    if pad > 2 {
-        return None;
-    }
-    let data = &symbols[..symbols.len() - pad];
-    let mut out = Vec::with_capacity(data.len() / 4 * 3);
-    let (mut acc, mut bits) = (0u32, 0u32);
-    for &b in data {
-        let v = match b {
-            b'A'..=b'Z' => b - b'A',
-            b'a'..=b'z' => b - b'a' + 26,
-            b'0'..=b'9' => b - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        };
-        acc = (acc << 6) | u32::from(v);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-            acc &= (1 << bits) - 1;
-        }
-    }
-    (acc == 0).then_some(out)
+    base64::engine::general_purpose::STANDARD
+        .decode(symbols)
+        .ok()
+        .filter(|bytes| !bytes.is_empty())
 }
 
 /// Whether `der` is exactly one DER SEQUENCE: tag 0x30, a definite length (short form, or long form
@@ -501,22 +477,19 @@ impl VaultClient {
     }
 
     /// The one request a read of `vault_path` sends. Its `target` is the path and query of
-    /// `{addr}/v1/{path}` as the `url` crate parses it (see `wire_url`); the fragment a `#`
+    /// `{addr}/v1/{path}` as the `url` crate parses it (using `url::Url`); the fragment a `#`
     /// starts is not sent. It is never a fallback.
     ///
     /// # Errors
     /// [`SecretErrorKind::Unavailable`](busbar_contract::secret::SecretErrorKind::Unavailable): the request URL is not a valid URL.
     pub fn request(&self, vault_path: &str) -> SecretResult<Request> {
         let url = self.url(vault_path);
-        let wire = wire_url(&url);
-        let sent = wire.split_once('#').map_or(wire.as_str(), |(sent, _)| sent);
-        let target = sent
-            .parse::<http::Uri>()
-            .map_err(|e| e.to_string())
-            .and_then(|u| {
-                u.path_and_query()
-                    .map(|p| p.as_str().to_owned())
-                    .ok_or_else(|| "no path".to_owned())
+        let target = url::Url::parse(&url)
+            .and_then(|parsed| {
+                if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                    return Err(url::ParseError::RelativeUrlWithoutBase);
+                }
+                Ok(parsed[url::Position::BeforePath..url::Position::AfterQuery].to_owned())
             })
             .map_err(|cause| {
                 SecretModuleError::unavailable(format!(
@@ -571,104 +544,6 @@ fn without_userinfo(addr: &str) -> String {
         Some(at) => format!("{}{}", &addr[..start], &addr[start + at + 1..]),
         None => addr.to_string(),
     }
-}
-
-/// The bytes the `url` crate percent-encodes in a URL's fragment (besides every C0 control, DEL and
-/// non-ASCII byte, which every part encodes).
-const FRAGMENT_SET: &[u8] = b" \"<>`";
-/// The bytes it percent-encodes in a special-scheme path: the fragment's, plus `#`, `?`, `{`, `}`.
-const PATH_SET: &[u8] = b" \"<>`#?{}";
-/// The bytes it percent-encodes in a special-scheme query.
-const QUERY_SET: &[u8] = b" \"#<>'";
-
-/// `part` with every C0 control, DEL, non-ASCII byte and byte of `set` written `%XX`; the rest (`%`
-/// included) unchanged.
-fn encoded(part: &str, set: &[u8]) -> String {
-    let mut out = String::with_capacity(part.len());
-    for &b in part.as_bytes() {
-        if !(0x20..0x7F).contains(&b) || set.contains(&b) {
-            let _ = write!(out, "%{b:02X}");
-        } else {
-            out.push(char::from(b));
-        }
-    }
-    out
-}
-
-/// `url` (`{addr}/v1/{path}`) as the `url` crate (WHATWG, special scheme) parses and writes it,
-/// which is how 1.5.5 sent it (`reqwest` parsed the string) and named it in a transport failure:
-/// leading and trailing C0 controls and spaces trimmed, every tab and newline removed, the first
-/// `#` starting the fragment and the first `?` before it the query, the path normalised (see
-/// [`normalise_url_path`]) and each part percent-encoded by its own set. The host part is kept as
-/// written.
-fn wire_url(url: &str) -> String {
-    let cleaned: String = url
-        .trim_matches(|c: char| c <= ' ')
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-        .collect();
-    let (url, fragment) = match cleaned.split_once('#') {
-        Some((url, fragment)) => (url, Some(fragment)),
-        None => (cleaned.as_str(), None),
-    };
-    let path_start = url.find("://").map_or(0, |i| {
-        url[i + 3..].find('/').map_or(url.len(), |j| i + 3 + j)
-    });
-    let (origin, rest) = url.split_at(path_start);
-    let (path, query) = match rest.split_once('?') {
-        Some((path, query)) => (path, Some(query)),
-        None => (rest, None),
-    };
-    let mut out = normalise_url_path(&format!("{origin}{}", encoded(path, PATH_SET)));
-    if let Some(query) = query {
-        out.push('?');
-        out.push_str(&encoded(query, QUERY_SET));
-    }
-    if let Some(fragment) = fragment {
-        out.push('#');
-        out.push_str(&encoded(fragment, FRAGMENT_SET));
-    }
-    out
-}
-
-/// `url`'s path as the `url` crate (WHATWG, special scheme) writes it, which is how 1.5.5 built the
-/// request URL from `{addr}/v1/{path}`: `\` is `/`, a `.` segment (or `%2e`, any case) is dropped,
-/// a `..` segment (`.%2e`, `%2e.`, `%2e%2e`) removes the segment before it and never climbs above
-/// the root, and a trailing `.`/`..` leaves a trailing `/`. The `addr` prefix and `/v1` are
-/// segments like any other, so a leading `..` in the operator's path pops them. `url` carries no
-/// query: [`wire_url`] splits it off at the first `?` before this runs.
-fn normalise_url_path(url: &str) -> String {
-    let path_start = url
-        .find("://")
-        .and_then(|i| url[i + 3..].find('/').map(|j| i + 3 + j));
-    let Some(start) = path_start else {
-        return url.to_string();
-    };
-    let (origin, path) = url.split_at(start);
-    let path = path.replace('\\', "/");
-    let is_dots = |seg: &str, n: usize| {
-        let lower = seg.to_ascii_lowercase();
-        let dots = lower.replace("%2e", ".");
-        dots == ".".repeat(n)
-    };
-    let mut segments: Vec<&str> = Vec::new();
-    let all: Vec<&str> = path[1..].split('/').collect();
-    for (i, seg) in all.iter().enumerate() {
-        let last = i + 1 == all.len();
-        if is_dots(seg, 2) {
-            segments.pop();
-            if last {
-                segments.push("");
-            }
-        } else if is_dots(seg, 1) {
-            if last {
-                segments.push("");
-            }
-        } else {
-            segments.push(seg);
-        }
-    }
-    format!("{origin}/{}", segments.join("/"))
 }
 
 /// `http`'s status rendering (`"404 Not Found"`).
