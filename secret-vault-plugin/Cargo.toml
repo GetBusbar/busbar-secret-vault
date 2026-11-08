@@ -45,5 +45,6 @@ busbar-transport-http = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 serde_json = { workspace = true }
 
+busbar-contract = { workspace = true, features = ["test-seal"] }
 [lints]
 workspace = true

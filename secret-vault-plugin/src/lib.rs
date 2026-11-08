@@ -6,12 +6,12 @@
 
 #![deny(unsafe_code)]
 
-pub use busbar_secret_vault::*;
+pub use busbar_secret_vault::{door, MACRO_DOOR};
 
 /// The exported door, behind `dropped-in` (the cdylib build only): the macro exports
 /// `busbar_plugin_door` for the host loader.
 #[cfg(feature = "dropped-in")]
 #[allow(unsafe_code)]
 mod exported {
-    busbar_contract::export_door!(busbar_secret_vault::door::door);
+    busbar_contract::export_door!(busbar_secret_vault::door);
 }

@@ -194,7 +194,7 @@ const TOKEN: &[u8] = b"s.never-in-a-message";
 fn cfg(addr: &str) -> VaultConfig {
     VaultConfig {
         addr: addr.to_string(),
-        token: json!({ "env": "VAULT_TOKEN" }).into(),
+        _token: json!({ "env": "VAULT_TOKEN" }).into(),
         ca_cert_pem: None,
         timeout_secs: 10,
     }
@@ -835,7 +835,7 @@ fn guarded_config_keeps_root_duplicate_refusal_and_nested_value_semantics() {
     let nested =
         parse_config(br#"{"addr":"http://v","token":{"nested":[{"k":"lost","\u006b":"kept"}]}}"#)
             .unwrap();
-    assert_eq!(nested.token["nested"][0]["k"], "kept");
+    assert_eq!(nested._token["nested"][0]["k"], "kept");
 }
 
 #[test]
@@ -1528,10 +1528,10 @@ fn the_token_reference_is_kept_whole_for_every_json_number() {
     for token in ["5", "-5", "1.5", "18446744073709551616"] {
         let settings = format!(r#"{{"addr":"https://v","token":{token}}}"#);
         let c = parse_config(settings.as_bytes()).unwrap();
-        assert_eq!(c.token.to_string(), token);
+        assert_eq!(c._token.to_string(), token);
     }
     let c = parse_config(br#"{"addr":"https://v","token":{"env":"T","n":[-1,2]}}"#).unwrap();
-    assert_eq!(*c.token, json!({"env":"T","n":[-1,2]}));
+    assert_eq!(*c._token, json!({"env":"T","n":[-1,2]}));
 }
 
 /// A status `http` cannot name (e.g. the 0 a host answers for an unparseable status line) is

@@ -145,7 +145,7 @@ fn client(settings: &[u8], secrets: &[&[u8]]) -> Result<VaultClient, Refusal> {
 /// CA, else over `NEED_PUBLIC`, to the need's target (`addr`), at the request's path; PENDING
 /// while it runs (the op is re-entered on its wake and the parked exchange resumed).
 pub struct HostExchange<'a> {
-    op: Op<'a>,
+    op: Op<'a, busbar_contract::plugin::markers::SecretKind>,
 }
 
 impl std::fmt::Debug for HostExchange<'_> {
@@ -157,8 +157,8 @@ impl std::fmt::Debug for HostExchange<'_> {
 impl<'a> HostExchange<'a> {
     /// The exchange the op `instance` runs over the host tables `open` handed it.
     pub fn new<'b: 'a, T: Send + Sync + 'static>(
-        instance: &'a Instance<'b, T>,
-        host: Option<&'a Host>,
+        instance: &'a Instance<'b, T, busbar_contract::plugin::markers::SecretKind>,
+        host: Option<&'a Host<busbar_contract::plugin::markers::SecretKind>>,
     ) -> Self {
         Self {
             op: Op::new(instance, host),
@@ -303,6 +303,7 @@ impl Vault {
 }
 
 impl Life for Vault {
+    type Kind = busbar_contract::plugin::markers::SecretKind;
     const CANCEL: u32 = cancel::ABORTED;
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
@@ -326,11 +327,12 @@ impl Life for Vault {
 pub struct Resolve;
 
 impl SafeSlot for Resolve {
+    type Kind = busbar_contract::plugin::markers::SecretKind;
     type In = ResolveIn;
     type Out = ResolveOut;
     type State = Held<Vault>;
     fn call(
-        instance: Instance<'_, Held<Vault>>,
+        instance: Instance<'_, Held<Vault>, busbar_contract::plugin::markers::SecretKind>,
         input: Lent<'_, ResolveIn>,
         mut out: Out<'_, ResolveOut>,
     ) -> Outcome {

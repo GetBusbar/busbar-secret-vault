@@ -75,9 +75,8 @@ fn checked_call<
     operation: u32,
     frame: &mut Frame<I, O>,
 ) -> Called {
-    use std::sync::atomic::Ordering::SeqCst;
-    let before = plugin.inner.crossings.load(SeqCst);
-    let resumes = plugin.inner.resumes.load(SeqCst);
+    let before = plugin.test_invocations().0;
+    let resumes = plugin.test_invocations().1;
     let called = plugin.call(operation, frame);
     if let Some(error) = &called.error {
         clean(error);
@@ -93,13 +92,13 @@ fn checked_call<
         && matches!(called.outcome, Outcome::Refused | Outcome::Fault))
         || ca_preflight;
     assert_eq!(
-        plugin.inner.crossings.load(SeqCst) - before,
+        plugin.test_invocations().0 - before,
         u64::from(!refused_before_crossing),
         "lifecycle slot {operation} outcome {:?}, sanitized reason {:?}",
         called.outcome,
         called.error.as_deref().map(String::from_utf8_lossy)
     );
-    assert_eq!(plugin.inner.resumes.load(SeqCst) - resumes, 0);
+    assert_eq!(plugin.test_invocations().1 - resumes, 0);
     if let Some(error) = &called.error {
         clean(error);
     }
@@ -125,7 +124,7 @@ fn plugin_with_trust(
     };
     match leg {
         Leg::Linked => load_linked::<Secret>(
-            &LinkedRow::of(busbar_secret_vault::door::door).expect("real row states"),
+            &LinkedRow::of(busbar_secret_vault::door).expect("real row states"),
             bind,
         ),
         Leg::Dropped => {
@@ -206,6 +205,7 @@ fn dispatcher() -> Arc<Dispatcher> {
             busbar_kernel::host_services::KernelServices::new()
                 .with_mono_clock(Arc::new(busbar_plugin_loader::dispatch::now_ns)),
         ),
+        busbar_contract::services::test_caller_binding(),
     ))
 }
 
@@ -254,7 +254,7 @@ fn host(
         std::ptr::from_ref(busbar_transport_tcp::linked::door()).cast()
     }
     extern "C" fn http_door() -> *const busbar_contract::abi::mechanism::door::Door {
-        std::ptr::from_ref(busbar_transport_http::door::door()).cast()
+        std::ptr::from_ref(busbar_transport_http::door()).cast()
     }
     let drivers: [(&str, busbar_contract::abi::sdk::door::RawDoorFn); 2] =
         [("tcp", tcp_door), ("http", http_door)];
@@ -372,7 +372,7 @@ fn response(status: u16, body: Vec<u8>, unfinished: bool) -> (String, JoinHandle
         let mut stream = accept(&listener);
         request(&mut stream);
         let declared = if unfinished {
-            body.len() + busbar_secret_vault::MAX_VAULT_RESPONSE_BYTES
+            body.len() + (1024 * 1024)
         } else {
             body.len()
         };
@@ -475,9 +475,8 @@ fn resolve_on_gated(
         &std::sync::atomic::AtomicUsize,
     )>,
 ) -> Answer {
-    use std::sync::atomic::Ordering::SeqCst;
-    let entered = plugin.inner.crossings.load(SeqCst);
-    let resumed = plugin.inner.resumes.load(SeqCst);
+    let entered = plugin.test_invocations().0;
+    let resumed = plugin.test_invocations().1;
     let lending = Arc::new(Lending {
         settings: reference.to_vec(),
         material: Mutex::new(vec![0; secret_cap]),
@@ -549,12 +548,12 @@ fn resolve_on_gated(
         );
         if let Some((permit, observed)) = permit {
             let until = Instant::now() + Duration::from_secs(10);
-            while plugin.inner.resumes.load(SeqCst) == resumed {
+            while plugin.test_invocations().1 == resumed {
                 if let Some(done) = reply.wait(Duration::ZERO) {
                     if let Some(error) = &done.error {
                         clean(error);
                     }
-                    panic!("gated resolve ended before response release: outcome {:?}, sanitized error {:?}, prior completed actual HTTP requests {}",done.outcome,done.error.as_deref().map(String::from_utf8_lossy),observed.load(SeqCst));
+                    panic!("gated resolve ended before response release: outcome {:?}, sanitized error {:?}, prior completed actual HTTP requests {}",done.outcome,done.error.as_deref().map(String::from_utf8_lossy),observed.load(std::sync::atomic::Ordering::SeqCst));
                 }
                 assert!(
                     Instant::now() < until,
@@ -583,8 +582,8 @@ fn resolve_on_gated(
             done.frame,
         )
     };
-    let resumes = plugin.inner.resumes.load(SeqCst) - resumed;
-    let first_entries = plugin.inner.crossings.load(SeqCst) - entered - resumes;
+    let resumes = plugin.test_invocations().1 - resumed;
+    let first_entries = plugin.test_invocations().0 - entered - resumes;
     let host_refusal = matches!(called.outcome, Outcome::Refused | Outcome::Fault);
     if cancelled {
         assert!(
@@ -682,7 +681,7 @@ fn a_real_short_answer_names_the_needed_length_without_writing_partial_material(
 
 #[test]
 fn the_real_exchange_accepts_at_the_cap_and_refuses_one_byte_past_it() {
-    let cap = busbar_secret_vault::MAX_VAULT_RESPONSE_BYTES;
+    let cap = 1024 * 1024;
     for leg in [Leg::Linked, Leg::Dropped] {
         for len in [cap, cap + 1] {
             let mut body = br#"{"data":{"data":{"k":"bounded-material"}}}"#.to_vec();
@@ -712,7 +711,7 @@ fn the_real_exchange_accepts_at_the_cap_and_refuses_one_byte_past_it() {
 
 #[test]
 fn an_unfinished_reply_past_the_cap_preserves_the_actual_status_and_closes() {
-    let cap = busbar_secret_vault::MAX_VAULT_RESPONSE_BYTES;
+    let cap = 1024 * 1024;
     for leg in [Leg::Linked, Leg::Dropped] {
         for status in [200, 400, 403, 404, 503] {
             let body = vec![b'x'; cap + 16 * 1024];
@@ -724,18 +723,14 @@ fn an_unfinished_reply_past_the_cap_preserves_the_actual_status_and_closes() {
                     answer.called
                 )
             });
-            let expected = busbar_secret_vault::judge(
-                "kv/data/x",
-                "k",
-                &format!("{addr}/v1/kv/data/x"),
-                Ok(busbar_secret_vault::Response {
-                    status,
-                    body: busbar_contract::abi::sdk::cred::Held::new(Vec::new()),
-                    body_len: cap + 2,
-                }),
-            )
-            .err()
-            .unwrap();
+            use busbar_contract::secret::SecretModuleError;
+            let url = format!("{addr}/v1/kv/data/x");
+            let expected = match status {
+                404 => SecretModuleError::not_found(format!("Vault has no secret at path \"kv/data/x\" (404 from {url})")),
+                403 => SecretModuleError::denied(format!("Vault denied reading path \"kv/data/x\" (403 from {url}): check the token is valid and its policy grants read on this path")),
+                503 => SecretModuleError::unavailable(format!("Vault server error reading path \"kv/data/x\": HTTP 503 Service Unavailable from {url}")),
+                _ => SecretModuleError::unavailable(format!("Vault response body exceeds the {cap}-byte cap (path \"kv/data/x\", {url})")),
+            };
             assert_eq!(
                 answer.called.outcome,
                 Outcome::Failed,
@@ -1255,7 +1250,7 @@ fn ordinary_lifecycle_resolution_and_refused_refresh_preserve_the_vault_contract
         }
     }
     fn closed_resolve(p: &Plugin<Secret>) {
-        let before = p.inner.crossings.load(SeqCst);
+        let before = p.test_invocations().0;
         let mut bytes = [0u8; 32];
         let mut frame = Frame::new(
             ResolveIn {
@@ -1276,7 +1271,7 @@ fn ordinary_lifecycle_resolution_and_refused_refresh_preserve_the_vault_contract
         assert_ne!(called.outcome, Outcome::Ready);
         assert_eq!(called.lease, 0);
         assert_eq!(
-            p.inner.crossings.load(SeqCst),
+            p.test_invocations().0,
             before,
             "host refuses a non-open instance before entering product"
         );
@@ -1373,10 +1368,10 @@ fn ordinary_lifecycle_resolution_and_refused_refresh_preserve_the_vault_contract
         permit: &std::sync::mpsc::Sender<()>,
         observed: &AtomicUsize,
     ) -> Answer {
-        let resumed = p.inner.resumes.load(SeqCst);
+        let resumed = p.test_invocations().1;
         let answer = resolve_on_gated(p, d, reference, None, cap, Some((permit, observed)));
         assert!(
-            p.inner.resumes.load(SeqCst) > resumed,
+            p.test_invocations().1 > resumed,
             "withheld actual HTTP response forces actual worker PENDING and RESUME"
         );
         answer
@@ -1386,7 +1381,7 @@ fn ordinary_lifecycle_resolution_and_refused_refresh_preserve_the_vault_contract
         let d = dispatcher();
         let p = plugin(&d, leg, "vault-ordinary-lifecycle");
         let statement = busbar_contract::abi::mechanism::rendering::read(
-            &busbar_plugin_loader::dispatch::rendering_of(busbar_secret_vault::door::door).unwrap(),
+            &busbar_plugin_loader::dispatch::rendering_of(busbar_secret_vault::door).unwrap(),
         )
         .unwrap();
         let mut needs: Vec<_> = statement
@@ -1423,12 +1418,9 @@ fn ordinary_lifecycle_resolution_and_refused_refresh_preserve_the_vault_contract
             assert_eq!(opening.lease, 0);
         }
         closed_resolve(&p);
-        let entries = p.inner.crossings.load(SeqCst);
+        let entries = p.test_invocations().0;
         p.ready(&d, Duration::from_secs(10)).unwrap();
-        assert_eq!(
-            p.inner.crossings.load(SeqCst) - entries,
-            u64::from(p.has_ready())
-        );
+        assert_eq!(p.test_invocations().0 - entries, u64::from(p.has_ready()));
         assert_eq!(open(&p, settings.as_bytes()).outcome, Outcome::Ready);
         assert_ne!(open(&p, settings.as_bytes()).outcome, Outcome::Ready);
         for reference in [

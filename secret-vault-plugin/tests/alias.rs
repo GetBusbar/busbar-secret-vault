@@ -10,8 +10,8 @@ use busbar_plugin_loader::dispatch::LinkedRow;
 
 #[test]
 fn the_statement_states_the_module_alias_and_nothing_else() {
-    let row = LinkedRow::of(busbar_secret_vault::door::door)
-        .expect("the linked door states its Statement");
+    let row =
+        LinkedRow::of(busbar_secret_vault::door).expect("the linked door states its Statement");
     let rewrites = read(&row.statement)
         .expect("the Statement rendering reads back")
         .rewrites;

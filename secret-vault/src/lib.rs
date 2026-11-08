@@ -61,7 +61,7 @@ use busbar_contract::secret::{SecretModuleError, SecretResult};
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
-pub mod door;
+pub(crate) mod door;
 mod migrate;
 
 /// The plugin's name: the Statement's and the manifest's. (The `module` alias a reference spells is
@@ -75,10 +75,10 @@ pub const WORD: &str = "vault";
 /// Upper bound on a Vault KV v2 response body: generous headroom over a handful of short fields,
 /// while bounding the allocation against a hostile or misbehaving endpoint. A reply under it is
 /// read without building a tree of its siblings, so it cannot grow far past this in memory.
-pub const MAX_VAULT_RESPONSE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_VAULT_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// The settings key whose value is the token's secret reference (the Statement's `secret_refs`).
-pub const TOKEN_KEY: &str = "token";
+pub(crate) const TOKEN_KEY: &str = "token";
 
 /// Default HTTP timeout (connect + total), in seconds.
 fn default_timeout_secs() -> u64 {
@@ -90,11 +90,11 @@ fn default_timeout_secs() -> u64 {
 /// `addr` without userinfo and never the token reference (which may be a literal). Dropping it
 /// (or a clone) wipes every string it holds.
 #[derive(Clone)]
-pub struct VaultConfig {
+pub(crate) struct VaultConfig {
     /// The Vault server address, e.g. `https://vault.internal:8200`. A trailing slash is tolerated.
     pub addr: String,
     /// The token's secret reference, as the operator wrote it (required).
-    pub token: SettingsValue,
+    _token: SettingsValue,
     /// An ADDITIONAL trusted root CA certificate (PEM), layered on top of the public root store.
     /// Never disables certificate validation, only widens the trusted-root set. Carried to the
     /// host as the need's `trust_from`.
@@ -131,7 +131,7 @@ impl std::fmt::Debug for VaultConfig {
 ///
 /// # Errors
 /// The operator-facing refusal text.
-pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
+pub(crate) fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
     let text = std::str::from_utf8(settings)
         .map_err(|e| format!("invalid hashicorp-vault plugin config: {e}"))?;
     if text.trim().is_empty() {
@@ -194,7 +194,7 @@ pub fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
             .take("addr")
             .and_then(SettingsValue::into_string)
             .unwrap_or_default(),
-        token: tree.take(TOKEN_KEY).expect("validated required token"),
+        _token: tree.take(TOKEN_KEY).expect("validated required token"),
         ca_cert_pem: tree
             .take("ca_cert_pem")
             .and_then(SettingsValue::into_string),
@@ -305,7 +305,7 @@ fn addr_is_a_server_url(addr: &str) -> bool {
 ///
 /// # Errors
 /// [`SecretErrorKind::Invalid`](busbar_contract::secret::SecretErrorKind::Invalid), naming what is missing.
-pub fn parse_reference(
+pub(crate) fn parse_reference(
     settings: &serde_json::Map<String, serde_json::Value>,
 ) -> SecretResult<(String, String)> {
     let path = settings
@@ -356,7 +356,7 @@ pub fn parse_reference(
 /// ONE framed http request, as the plugin hands it to the host's exchange. The token rides as a
 /// sealed head field; `Debug` never prints field values. Requests clone the opaque credential,
 /// which wipes when its last client or request owner drops.
-pub struct Request {
+pub(crate) struct Request {
     /// The method (`GET`).
     pub method: &'static str,
     /// The display form of the target URL, `{addr}/v1/{path}` with any `addr` userinfo removed: the
@@ -397,7 +397,7 @@ impl std::fmt::Debug for Request {
 /// ONE framed http response, as the exchange answers it. Dropping it zeroizes the body, and `Debug`
 /// never prints it (it may hold the material).
 #[derive(PartialEq, Eq)]
-pub struct Response {
+pub(crate) struct Response {
     /// The status code.
     pub status: u16,
     /// The body, at most the request's `body_cap` bytes.
@@ -419,7 +419,7 @@ impl std::fmt::Debug for Response {
 
 /// What an exchange answered for one call.
 #[derive(Debug)]
-pub enum Exchanged {
+pub(crate) enum Exchanged {
     /// Not ready: the host fires the op's wake when it is, and the op is re-invoked.
     Pending,
     /// The response, or the host's [`ConnFailure`] class (its text never carries secret material):
@@ -431,14 +431,14 @@ pub enum Exchanged {
 /// [`door::HostExchange`] implements in production and tests stand in for. Re-serving a stored
 /// result to a re-invoked op is the SDK `Op`'s job (it holds the parked exchange on the op's
 /// ticket), not this trait's.
-pub trait Exchange {
+pub(crate) trait Exchange {
     /// Run (or collect) the exchange.
     fn exchange(&self, request: &Request) -> Exchanged;
 }
 
 /// The Vault client: the resolved `addr`, the token material and the transport settings, built
 /// once at `open` (and at `refresh`) and reused for every `resolve`.
-pub struct VaultClient {
+pub(crate) struct VaultClient {
     addr: String,
     token: Cred,
     timeout_secs: u64,
@@ -569,7 +569,7 @@ fn status_text(status: u16) -> String {
 ///
 /// # Errors
 /// The classified refusal; its text never carries the token or the material.
-pub fn judge(
+pub(crate) fn judge(
     vault_path: &str,
     field: &str,
     url: &str,
@@ -683,3 +683,6 @@ mod audit_tests;
 #[cfg(test)]
 #[path = "tests/custody_support.rs"]
 mod custody_support;
+
+/// The validated entry and generated registration descriptor.
+pub use door::{door, MACRO_DOOR};

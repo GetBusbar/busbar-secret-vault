@@ -8,6 +8,7 @@ use busbar_contract::abi::sdk::migrate::{Migrate, MigrateNeed, Migrated};
 pub(crate) struct VaultMigration;
 
 impl Migrate for VaultMigration {
+    type Kind = busbar_contract::plugin::markers::SecretKind;
     fn migrate(settings: serde_json::Value, from: &str) -> Migrated {
         let mut migrated = Migrated::unchanged(settings);
         if before_reference_only_tokens(from)

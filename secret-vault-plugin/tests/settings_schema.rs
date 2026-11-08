@@ -3,7 +3,7 @@
 
 #[test]
 fn settings_schema_is_carried_by_statement() {
-    let bytes = busbar_plugin_loader::dispatch::rendering_of(busbar_secret_vault::door::door)
+    let bytes = busbar_plugin_loader::dispatch::rendering_of(busbar_secret_vault::door)
         .expect("actual linked door renders");
     let statement = busbar_contract::abi::mechanism::rendering::read(&bytes)
         .expect("Statement rendering reads");

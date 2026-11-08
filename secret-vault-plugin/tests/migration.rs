@@ -63,7 +63,7 @@ fn assert_migration_contract(migrate: impl Fn(&Value, &str) -> Migrated) {
 #[test]
 fn linked_vault_migration_requests_literal_extraction_without_exposing_it() {
     assert_migration_contract(|settings, from| {
-        migrate_door(raw(busbar_secret_vault::door::door), settings, from)
+        migrate_door(raw(busbar_secret_vault::door), settings, from)
             .expect("actual linked Vault migration answers")
             .expect("actual Vault door declares MIGRATE")
     });

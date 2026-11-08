@@ -79,7 +79,7 @@ pub(super) fn watch_config(config: &super::VaultConfig) {
             _ => {}
         }
     }
-    watch(&config.token);
+    watch(&config._token);
     if let Some(pem) = &config.ca_cert_pem {
         probe::watch("config CA", pem.as_bytes());
     }
