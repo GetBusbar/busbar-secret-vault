@@ -341,23 +341,25 @@ fn the_request_is_1_5_5s_get_with_the_token_header() {
 
 #[test]
 fn a_field_is_read_as_its_string_bytes_or_its_json_text() {
-    let ex = Canned::status(
-        200,
-        &kv2(json!({ "api_key": "sk-1", "n": 7, "o": { "a": true } })),
-    );
-    assert_eq!(
-        run(&ex, json!({ "path": "kv/data/openai#api_key" })).unwrap(),
-        b"sk-1"
-    );
-    assert_eq!(
-        run(&ex, json!({ "path": "kv/data/openai", "field": "n" })).unwrap(),
-        b"7"
-    );
-    assert_eq!(
-        run(&ex, json!({ "path": "kv/data/openai#o" })).unwrap(),
-        br#"{"a":true}"#
-    );
-    assert_eq!(ex.seen.lock().unwrap()[0], format!("GET {URL}"));
+    let body = kv2(json!({ "api_key": "sk-1", "n": 7, "o": { "a": true } }));
+    for (reference, expected) in [
+        (
+            json!({ "path": "kv/data/openai#api_key" }),
+            b"sk-1".as_slice(),
+        ),
+        (
+            json!({ "path": "kv/data/openai", "field": "n" }),
+            b"7".as_slice(),
+        ),
+        (
+            json!({ "path": "kv/data/openai#o" }),
+            br#"{"a":true}"#.as_slice(),
+        ),
+    ] {
+        let ex = Canned::status(200, &body);
+        assert_eq!(run(&ex, reference).unwrap(), expected);
+        assert_eq!(*ex.seen.lock().unwrap(), [format!("GET {URL}")]);
+    }
 }
 
 #[test]
@@ -797,9 +799,9 @@ fn config_refusals_name_the_plugin_and_invalid_setting() {
         "hashicorp-vault plugin requires config (addr, token); none provided"
     );
     let e = parse_config(b"{ this is not json").err().unwrap();
-    assert!(
-        e.contains("invalid hashicorp-vault plugin config") && e.contains("key must be a string"),
-        "{e}"
+    assert_eq!(
+        e,
+        "invalid hashicorp-vault plugin config: it is not well-formed JSON (line 1, column 3; the decoder's text is withheld)"
     );
     let e = parse_config(br#"{"addr":"http://v"}"#).err().unwrap();
     assert!(e.contains("missing field `token`"), "{e}");
