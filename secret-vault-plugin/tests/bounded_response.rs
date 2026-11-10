@@ -727,7 +727,7 @@ fn an_unfinished_reply_past_the_cap_preserves_the_actual_status_and_closes() {
             let url = format!("{addr}/v1/kv/data/x");
             let expected = match status {
                 404 => SecretModuleError::not_found(format!("Vault has no secret at path \"kv/data/x\" (404 from {url})")),
-                403 => SecretModuleError::denied(format!("Vault denied reading path \"kv/data/x\" (403 from {url}): check the token is valid and its policy grants read on this path")),
+                403 => SecretModuleError::denied(format!("Vault denied reading path \"kv/data/x\" (403 Forbidden from {url}): check the token is valid and its policy grants read on this path")),
                 503 => SecretModuleError::unavailable(format!("Vault server error reading path \"kv/data/x\": HTTP 503 Service Unavailable from {url}")),
                 _ => SecretModuleError::unavailable(format!("Vault response body exceeds the {cap}-byte cap (path \"kv/data/x\", {url})")),
             };

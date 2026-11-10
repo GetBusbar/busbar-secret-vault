@@ -413,7 +413,15 @@ fn response_classes_report_kind_and_safe_context() {
             Canned::status(403, "{\"errors\":[\"permission denied\"]}"),
             SecretErrorKind::Denied,
             format!(
-                "Vault denied reading path {p} (403 from {URL}): check the token is valid and \
+                "Vault denied reading path {p} (403 Forbidden from {URL}): check the token is valid and \
+                 its policy grants read on this path"
+            ),
+        ),
+        (
+            Canned::status(401, ""),
+            SecretErrorKind::Denied,
+            format!(
+                "Vault denied reading path {p} (401 Unauthorized from {URL}): check the token is valid and \
                  its policy grants read on this path"
             ),
         ),

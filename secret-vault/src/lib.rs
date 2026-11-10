@@ -600,10 +600,11 @@ pub(crate) fn judge(
             "Vault has no secret at path {vault_path:?} (404 from {url})"
         )));
     }
-    if status == 403 {
+    if status == 403 || status == 401 {
         return Err(SecretModuleError::denied(format!(
-            "Vault denied reading path {vault_path:?} (403 from {url}): check the token is \
-             valid and its policy grants read on this path"
+            "Vault denied reading path {vault_path:?} ({} from {url}): check the token is \
+             valid and its policy grants read on this path",
+            status_text(status)
         )));
     }
     if status == 429 {
