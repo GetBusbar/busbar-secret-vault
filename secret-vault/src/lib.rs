@@ -46,7 +46,7 @@
 //!
 //! ## Errors
 //!
-//! Fail-closed and specific: a 404 (no secret at that path), a 403 (bad token / missing
+//! Fail-closed and specific: a 404 (no secret at that path), a 401/403 (bad token / missing
 //! Vault policy) and a 5xx (Vault itself unhealthy) are distinct, human-readable errors, each tagged
 //! with its `abi::secret::ERROR_KIND_*`. No refusal carries the token, the material or any text of
 //! Vault's reply (its body, or the names of the fields it holds); an empty field is refused, never
@@ -146,8 +146,8 @@ pub(crate) fn parse_config(settings: &[u8]) -> Result<VaultConfig, String> {
         .as_object()
         .ok_or_else(|| invalid("expected struct VaultConfig"))?;
     const FIELDS: &[&str] = &["addr", "token", "ca_cert_pem", "timeout_secs"];
-    if object.keys().any(|key| !FIELDS.contains(&key.as_str())) {
-        return Err(invalid("unknown configuration field"));
+    if let Some(unknown) = object.keys().find(|key| !FIELDS.contains(&key.as_str())) {
+        return Err(invalid(&format!("unknown configuration field `{unknown}`")));
     }
     for name in ["addr", "token"] {
         if !object.contains_key(name) {
@@ -333,9 +333,9 @@ pub(crate) fn parse_reference(
         let field = field.as_str().ok_or_else(|| {
             SecretModuleError::invalid("`field` in secret reference settings must be a string")
         })?;
-        if field.is_empty() {
+        if field.trim().is_empty() {
             return Err(SecretModuleError::invalid(
-                "`field` in secret reference settings must not be empty",
+                "`field` in secret reference settings must not be blank",
             ));
         }
         return Ok((path.to_string(), field.to_string()));
@@ -345,7 +345,7 @@ pub(crate) fn parse_reference(
         Some((p, f)) if p.trim().is_empty() && !f.is_empty() => Err(SecretModuleError::invalid(
             "`path` in secret reference settings must not be blank",
         )),
-        Some((p, f)) if !p.is_empty() && !f.is_empty() => Ok((p.to_string(), f.to_string())),
+        Some((p, f)) if !p.is_empty() && !f.trim().is_empty() => Ok((p.to_string(), f.to_string())),
         _ => Err(SecretModuleError::invalid(format!(
             "vault secret reference must name a field to extract: either add a `field` key, or \
              suffix `path` with `#<field>` (e.g. \"kv/data/openai#api_key\"); got path {path:?}"
@@ -481,7 +481,7 @@ impl VaultClient {
     /// starts is not sent. It is never a fallback.
     ///
     /// # Errors
-    /// [`SecretErrorKind::Unavailable`](busbar_contract::secret::SecretErrorKind::Unavailable): the request URL is not a valid URL.
+    /// [`SecretErrorKind::Internal`](busbar_contract::secret::SecretErrorKind::Internal): the request URL is not a valid URL.
     pub fn request(&self, vault_path: &str) -> SecretResult<Request> {
         let url = self.url(vault_path);
         let target = url::Url::parse(&url)
@@ -492,7 +492,7 @@ impl VaultClient {
                 Ok(parsed[url::Position::BeforePath..url::Position::AfterQuery].to_owned())
             })
             .map_err(|cause| {
-                SecretModuleError::unavailable(format!(
+                SecretModuleError::internal(format!(
                     "request to Vault ({url}) failed: the request URL is not a valid URL: {cause}"
                 ))
             })?;
@@ -555,7 +555,7 @@ fn status_text(status: u16) -> String {
 }
 
 /// Judge one exchange's outcome for a read of `field` at `vault_path` from `url`, in this order:
-/// transport failure, 404, 403, 429, 5xx, the body cap, 3xx (a redirect is never followed), any
+/// transport failure, 404, 401/403, 429, 5xx, the body cap, 3xx (a redirect is never followed), any
 /// other non-2xx, then the JSON, the KV v2 shape and the field.
 ///
 /// A transport failure names the configured request URL and the host's cause, so a refused

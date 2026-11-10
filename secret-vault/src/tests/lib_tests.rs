@@ -83,7 +83,7 @@ fn empty_explicit_field_is_rejected() {
     let s = settings(json!({ "path": "kv/data/openai", "field": "" }));
     let err = parse_reference(&s).err().unwrap();
     assert_eq!(err.kind, SecretErrorKind::Invalid);
-    assert!(err.message.contains("must not be empty"), "{}", err.message);
+    assert!(err.message.contains("must not be blank"), "{}", err.message);
 }
 
 /// End-to-end against a REAL Vault dev-mode server, gated on `BUSBAR_TEST_VAULT_ADDR` +
@@ -818,7 +818,7 @@ fn config_refusals_name_the_plugin_and_invalid_setting() {
     let e = parse_config(br#"{"addr":"http://v","token":"t","tls":true}"#)
         .err()
         .unwrap();
-    assert!(e.contains("unknown configuration field"), "{e}");
+    assert!(e.contains("unknown configuration field `tls`"), "{e}");
     let c = parse_config(br#"{"addr":"http://v","token":{"env":"T"},"timeout_secs":3}"#).unwrap();
     assert_eq!(
         (c.addr.as_str(), c.timeout_secs, c.ca_cert_pem.as_deref()),
@@ -919,7 +919,7 @@ fn an_addr_that_is_no_url_is_refused_before_any_exchange() {
         .unwrap()
         .err()
         .unwrap();
-    assert_eq!(e.kind, SecretErrorKind::Unavailable);
+    assert_eq!(e.kind, SecretErrorKind::Internal);
     let url = "vault.internal:8200/v1/kv/data/x";
     assert!(
         e.message.starts_with(&format!(
