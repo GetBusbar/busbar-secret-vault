@@ -42,7 +42,7 @@ busbar-plugin-loader = { workspace = true, features = ["test-support"] }
 busbar-core-connector = { workspace = true }
 busbar-transport-tcp = { workspace = true }
 busbar-transport-http = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 serde_json = { workspace = true }
 
 busbar-contract = { workspace = true, features = ["test-seal"] }
