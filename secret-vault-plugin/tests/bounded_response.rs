@@ -120,7 +120,13 @@ fn plugin_with_trust(
         max_inflight_cap: 1024,
         sink: Arc::new(AuditSink),
         dispatcher: d.adopter(),
-        conns: ConnTable::Host(host(d.conn_waker(), anchors, false)),
+        conns: ConnTable::Host(
+            busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                host(d.conn_waker(), anchors, false),
+                busbar_contract::secret_ref::Sugars::default(),
+            ),
+        ),
     };
     match leg {
         Leg::Linked => load_linked::<Secret>(

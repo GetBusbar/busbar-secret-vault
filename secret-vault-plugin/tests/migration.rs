@@ -1,12 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-use busbar_contract::abi::sdk::migrate::{MigrateNeed, Migrated};
+use busbar_contract::abi::sdk::migrate::{MigrateNeed, Migrated, MigrationAnswer};
 use busbar_plugin_loader::dispatch::load::raw;
 use busbar_plugin_loader::dispatch::migrate::{migrate_door, migrate_library};
 use serde_json::{json, Value};
 
 const CANARY: &str = "vault-migration-secret-${DO_NOT_EXPAND}-canary";
+
+fn owner_answer(answer: MigrationAnswer) -> Migrated {
+    let seal = busbar_contract::caps::KernelSeal::acquire_for_kernel();
+    Migrated {
+        settings: serde_json::to_value(answer.authoring(&seal)).unwrap(),
+        report: answer.report,
+        needs: answer.needs,
+    }
+}
 
 fn assert_migration_contract(migrate: impl Fn(&Value, &str) -> Migrated) {
     let old = json!({
@@ -63,9 +72,11 @@ fn assert_migration_contract(migrate: impl Fn(&Value, &str) -> Migrated) {
 #[test]
 fn linked_vault_migration_requests_literal_extraction_without_exposing_it() {
     assert_migration_contract(|settings, from| {
-        migrate_door(raw(busbar_secret_vault::door), settings, from)
-            .expect("actual linked Vault migration answers")
-            .expect("actual Vault door declares MIGRATE")
+        owner_answer(
+            migrate_door(raw(busbar_secret_vault::door), settings, from)
+                .expect("actual linked Vault migration answers")
+                .expect("actual Vault door declares MIGRATE"),
+        )
     });
 }
 
@@ -78,8 +89,10 @@ fn dropped_vault_migration_requests_literal_extraction_without_exposing_it() {
     assert!(path.is_absolute() && path.is_file());
     let bytes = std::fs::read(&path).expect("actual Vault image is readable");
     assert_migration_contract(|settings, from| {
-        migrate_library(&bytes, "actual-vault-migration-image", settings, from)
-            .expect("actual dropped Vault migration answers")
-            .expect("actual Vault image declares MIGRATE")
+        owner_answer(
+            migrate_library(&bytes, "actual-vault-migration-image", settings, from)
+                .expect("actual dropped Vault migration answers")
+                .expect("actual Vault image declares MIGRATE"),
+        )
     });
 }
