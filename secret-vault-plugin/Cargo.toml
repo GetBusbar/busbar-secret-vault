@@ -48,3 +48,6 @@ serde_json = { workspace = true }
 busbar-contract = { workspace = true, features = ["test-seal"] }
 [lints]
 workspace = true
+
+[package.metadata.busbar.test-artifacts]
+cdylib = ["BUSBAR_TEST_VAULT_CDYLIB"]
