@@ -10,13 +10,12 @@ pub(crate) struct VaultMigration;
 impl Migrate for VaultMigration {
     type Kind = busbar_contract::plugin::markers::SecretKind;
     fn migrate(settings: serde_json::Value, from: &str) -> Migrated {
-        let mut migrated = Migrated::unchanged(settings);
-        if before_reference_only_tokens(from)
-            && migrated
-                .settings
+        let inline_token = before_reference_only_tokens(from)
+            && settings
                 .get(crate::TOKEN_KEY)
-                .is_some_and(serde_json::Value::is_string)
-        {
+                .is_some_and(serde_json::Value::is_string);
+        let mut migrated = Migrated::unchanged(settings);
+        if inline_token {
             migrated.needs.push(MigrateNeed::ExternalizeSecret {
                 path: vec![crate::TOKEN_KEY.to_string()],
             });

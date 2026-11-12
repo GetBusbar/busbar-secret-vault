@@ -10,11 +10,20 @@ const CANARY: &str = "vault-migration-secret-${DO_NOT_EXPAND}-canary";
 
 fn owner_answer(answer: MigrationAnswer) -> Migrated {
     let seal = busbar_contract::caps::KernelSeal::acquire_for_kernel();
-    Migrated {
-        settings: serde_json::to_value(answer.authoring(&seal)).unwrap(),
-        report: answer.report,
-        needs: answer.needs,
-    }
+    Migrated::new(
+        serde_json::to_value(answer.authoring(&seal)).unwrap(),
+        answer.report,
+        answer.needs,
+    )
+}
+
+/// The settings a sealed [`Migrated`] carries, read back under the dev-only test kernel seal.
+fn settings_of(answer: &Migrated) -> serde_json::Value {
+    let seal = busbar_contract::caps::KernelSeal::acquire_for_kernel();
+    serde_json::to_value(
+        busbar_contract::abi::sdk::migrate::MigrationAnswer::from(answer.clone()).authoring(&seal),
+    )
+    .expect("migrated settings serialize")
 }
 
 fn assert_migration_contract(migrate: impl Fn(&Value, &str) -> Migrated) {
@@ -26,7 +35,8 @@ fn assert_migration_contract(migrate: impl Fn(&Value, &str) -> Migrated) {
     for from in ["1.5.5", "v1.5.5", "1.4.2"] {
         let first = migrate(&old, from);
         assert_eq!(
-            first.settings, old,
+            settings_of(&first),
+            old,
             "no invented reference or changed credential"
         );
         assert_eq!(
@@ -42,7 +52,7 @@ fn assert_migration_contract(migrate: impl Fn(&Value, &str) -> Migrated) {
         assert!(report.contains("settings.token"));
         assert!(report.contains("secure-file extraction"));
         assert!(!report.contains(CANARY) && !report.contains("DO_NOT_EXPAND"));
-        let repeated = migrate(&first.settings, from);
+        let repeated = migrate(&settings_of(&first), from);
         assert_eq!(
             repeated, first,
             "unconsumed extraction need is stable on repeated migration"
